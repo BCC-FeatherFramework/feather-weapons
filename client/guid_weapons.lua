@@ -42,6 +42,18 @@ local function CarriedWeaponsGuid()
         joaat('CARRIED_WEAPONS'), joaat('SLOTID_CARRIED_WEAPONS'))
 end
 
+-- GUID of a carried weapon for read-only consumers such as the inspection
+-- stats card. Tries the default carried slot, then Feather's paired slots.
+function FeatherGuidWeapons.ResolveCarried(weaponName)
+    local parent = CarriedWeaponsGuid()
+    if not parent then return nil end
+    for _, slotId in ipairs({ 0xA1212100, joaat('SLOTID_WEAPON_0'), joaat('SLOTID_WEAPON_1') }) do
+        local guid = FeatherGuidWeapons.ResolveGuid(INVENTORY_ID, parent, joaat(weaponName), slotId)
+        if guid then return guid end
+    end
+    return nil
+end
+
 local function RemoveRecord(record)
     if not record or not record.guid then return false end
 

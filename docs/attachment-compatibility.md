@@ -34,6 +34,8 @@ of scope until their representation and conflict rules are designed.
 | Elephant Rifle | Barrel | Elephant Long Barrel | `COMPONENT_RIFLE_ELEPHANT_BARREL_LONG` | Shipped | Passed full lifecycle |
 | Elephant Rifle | Sight | Elephant Wide Sight | `COMPONENT_RIFLE_ELEPHANT_SIGHT_WIDE` | Shipped | Passed full lifecycle |
 | Rolling Block Rifle | Sight | Rolling Block Wide Sight | `COMPONENT_RIFLE_ROLLINGBLOCK_SIGHT_WIDE` | Shipped | Passed full lifecycle |
+| Rolling Block Rifle | Scope | Rolling Block Scope (Type 3) | `COMPONENT_RIFLE_SCOPE03` | Candidate | [Live gate pending](rollingblock-scope-live-gate.md) |
+| Rolling Block Rifle | Scope | Rolling Block Scope (Type 4) | `COMPONENT_RIFLE_SCOPE04` | Candidate | [Live gate pending](rollingblock-scope-live-gate.md) |
 | Carcano Rifle | Sight | Carcano Wide Sight | `COMPONENT_RIFLE_CARCANO_SIGHT_WIDE` | Shipped | Passed full lifecycle |
 | Repeating Shotgun | Barrel | Repeating Shotgun Long Barrel | `COMPONENT_SHOTGUN_REPEATING_BARREL_LONG` | Shipped | Passed full lifecycle |
 | Repeating Shotgun | Sight | Repeating Shotgun Wide Sight | `COMPONENT_SHOTGUN_REPEATING_SIGHT_WIDE` | Shipped | Passed full lifecycle |

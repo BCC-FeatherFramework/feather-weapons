@@ -1,28 +1,18 @@
--- Run with the server stopped, before restarting Inventory and Weapons.
+-- Run with Inventory and Weapons stopped; restart afterward to reload item caches.
+-- Rename only when the canonical target is absent. Existing duplicates remain unchanged.
 -- Preserve numeric item IDs, owned instances, equipment, and metadata.
--- Existing target names cause a unique-key error: stop and resolve duplicates;
--- do not delete either item definition or use UPDATE IGNORE.
-UPDATE `items`
-SET `name` = CASE `name`
-    WHEN 'weapon_utility_lasso_reinforced' THEN 'weapon_lasso_reinforced'
-    WHEN 'weapon_utility_lasso' THEN 'weapon_lasso'
-    WHEN 'weapon_utility_davy_lantern' THEN 'weapon_melee_davy_lantern'
-    WHEN 'weapon_utility_binoculars_improved' THEN 'weapon_kit_binoculars_improved'
-    WHEN 'weapon_utility_binoculars' THEN 'weapon_kit_binoculars'
-    WHEN 'weapon_utility_metal_detector' THEN 'weapon_kit_metal_detector'
-    WHEN 'weapon_utility_fishing_rod' THEN 'weapon_fishingrod'
-    WHEN 'weapon_utility_camera_advanced' THEN 'weapon_kit_camera_advanced'
-    WHEN 'weapon_utility_camera' THEN 'weapon_kit_camera'
-    ELSE `name`
-END
-WHERE `name` IN (
-    'weapon_utility_lasso_reinforced',
-    'weapon_utility_lasso',
-    'weapon_utility_davy_lantern',
-    'weapon_utility_binoculars_improved',
-    'weapon_utility_binoculars',
-    'weapon_utility_metal_detector',
-    'weapon_utility_fishing_rod',
-    'weapon_utility_camera_advanced',
-    'weapon_utility_camera'
-);
+UPDATE `items` AS legacy
+JOIN (
+    SELECT 'weapon_utility_lasso_reinforced' AS old_name, 'weapon_lasso_reinforced' AS new_name
+    UNION ALL SELECT 'weapon_utility_lasso', 'weapon_lasso'
+    UNION ALL SELECT 'weapon_utility_davy_lantern', 'weapon_melee_davy_lantern'
+    UNION ALL SELECT 'weapon_utility_binoculars_improved', 'weapon_kit_binoculars_improved'
+    UNION ALL SELECT 'weapon_utility_binoculars', 'weapon_kit_binoculars'
+    UNION ALL SELECT 'weapon_utility_metal_detector', 'weapon_kit_metal_detector'
+    UNION ALL SELECT 'weapon_utility_fishing_rod', 'weapon_fishingrod'
+    UNION ALL SELECT 'weapon_utility_camera_advanced', 'weapon_kit_camera_advanced'
+    UNION ALL SELECT 'weapon_utility_camera', 'weapon_kit_camera'
+) AS renames ON legacy.`name` = renames.old_name
+LEFT JOIN `items` AS canonical ON canonical.`name` = renames.new_name
+SET legacy.`name` = renames.new_name
+WHERE canonical.`name` IS NULL;

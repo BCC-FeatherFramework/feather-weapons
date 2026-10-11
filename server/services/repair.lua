@@ -70,7 +70,9 @@ function RepairService.Repair(source, rpcContext, request, allowOwned)
         if not metadataResult.ok then return metadataResult end
 
         local current = tonumber(metadata.condition) or definition.condition.minimum
-        if current >= definition.condition.maximum then
+        local maintenance = type(metadata.maintenance) == "table" and metadata.maintenance or {}
+        local dirty = (tonumber(maintenance.dirt) or 0.0) > 0.0 or (tonumber(maintenance.soot) or 0.0) > 0.0
+        if current >= definition.condition.maximum and not dirty then
             return WeaponResult.Error(WeaponErrors.OPERATION_CONFLICT, "Weapon condition is already full", {
                 condition = current
             }, context.correlationId)

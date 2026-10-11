@@ -30,6 +30,7 @@ WeaponConstants = {
         grip = true,
         magazine = true,
         muzzle = true,
+        scope = true,
         sight = true,
         stock = true,
         wrap = true

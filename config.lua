@@ -155,7 +155,7 @@ Config = {
         maxInspectionEvents = 100
     },
     Issuance = {
-        trustedResources = { ["feather-weapons"] = true, ["feather-admin"] = true },
+        trustedResources = { ["feather-weapons"] = true, ["feather-admin"] = true, ["bcc-craft"] = true, ["bcc-shops"] = true },
         allowedPurposes = {
             development_grant = true, admin_issue = true, purchase = true,
             crafting = true, job_issue = true, recovery = true
@@ -177,6 +177,13 @@ Config = {
             enabled = true,
             defaultKey = "F7",
             command = "weaponammo"
+        },
+        -- Native inspect of the held gun. The clean prompt uses one repair
+        -- material (gun oil), the same as a repair.
+        inspect = {
+            enabled = true,
+            -- Command only, no key: /weaponinspect.
+            command = "weaponinspect"
         }
     }
 }

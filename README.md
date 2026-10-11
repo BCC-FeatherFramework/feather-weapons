@@ -76,18 +76,17 @@ character IDs are rejected and are not part of the release contract.
 ## Installation
 
 1. Install compatible versions of Feather Core and Feather Inventory.
-2. For an existing alpha database, run
-   [`sql/rename_weapon_ids.sql`](sql/rename_weapon_ids.sql) once.
-3. Run [`sql/install_items.sql`](sql/install_items.sql) after the Feather Inventory schema and migrations.
+2. Stop Inventory and Weapons before importing database changes.
+3. Import [`sql/feather_weapons.sql`](sql/feather_weapons.sql) after the Feather Inventory schema and migrations. This single file includes all weapon SQL scripts in migration order, followed by item setup and retired-item updates. Use a MySQL/MariaDB client that supports `DELIMITER` and stops on errors; do not use `--force`.
 4. Confirm `weapon_revolver_cattleman` exists as a unique, usable inventory definition.
 
 Weapon catalog IDs remain `revolver_cattleman` and `revolver_schofield` for
 metadata and grant commands. Their Inventory item names are
 `weapon_revolver_cattleman` and `weapon_revolver_schofield`.
 
-For existing installations, stop Inventory and Weapons and run
-`sql/rename_weapon_item_names.sql` before `sql/install_items.sql`.
-The rename preserves numeric item IDs and owned instances; it rejects conflicting rows.
+The combined import includes the legacy weapon, utility, and throwable item renames.
+Renames preserve numeric item IDs and owned instances. Utility and throwable renames skip existing target names, leaving both definitions and their ownership unchanged; owned legacy items are not converted to canonical definitions. Conflicting revolver rows must be resolved before retrying.
+The individual SQL files remain available for targeted migrations.
 
 Identical-hash dual wield is intentionally unsupported. A second weapon with
 the same native model remains in Inventory but cannot occupy the offhand slot.
@@ -251,7 +250,7 @@ The following commands are server-console only:
 Run the inspection command first. Reconciliation is an explicit recovery action,
 not routine gameplay synchronization.
 
-Players can change Feather's registered bindings in their Cfx key-binding settings. Unload defaults to `U`, weapon modifications to `F6`, and ammunition management to `F7`. Reload remains the native RedM `R` action and is not registered or intercepted by Feather. The menus can also be opened with `/weaponmods` and `/weaponammo`.
+Players can change Feather's registered bindings in their Cfx key-binding settings. Unload defaults to `U`, weapon modifications to `F6`, and ammunition management to `F7`. Weapon inspection is the `/weaponinspect` command. Reload remains the native RedM `R` action and is not registered or intercepted by Feather. The menus can also be opened with `/weaponmods` and `/weaponammo`.
 
 ## Gameplay
 
@@ -302,6 +301,13 @@ double-count RedM's native degradation. When multiple weapons are equipped,
 choose the primary, offhand, shoulder, or back weapon from the repair menu.
 Full-condition, stale-slot, and invalid repairs do not consume a kit.
 
+Use `/weaponinspect` while holding a gun to play RedM's native
+inspect: the weapon is raised, the stats card shows its condition, and the
+clean prompt appears when the weapon is worn, dirty, or sooty. Holding the
+clean prompt runs the same server repair transaction (one `gun_oil`); without
+oil the server rejects it and the inspection ends without changes. A weapon
+that is dirty or sooty at full condition can now be cleaned too.
+
 ### Weapon modifications
 
 Attachment installation and removal require proximity to a configured gunsmith bench. Equip the weapon at the Valentine bench, then press `F6` or use `/weaponmods` to install an owned compatible attachment or remove an installed one. The Long Barrel is not a usable item; the server verifies distance and ownership before starting the Inventory transaction.
@@ -313,9 +319,28 @@ weapon definition, and attachment ID, allowing an Authority-backed domain or job
 resource to enforce gunsmith access. Authorization is unrestricted by default
 and fails closed when enabled without an available policy decision.
 
+The Rolling Block also has a `scope` slot with two candidate scopes that
+replace its native scope (`rollingblock_scope_03`, `rollingblock_scope_04`);
+they are pending their live gate, see docs/rollingblock-scope-live-gate.md.
+
 Modification menus label definition-driven native defaults for empty component
 slots. These labels describe the weapon's built-in baseline and never create or
 return Inventory items.
+
+### Weapon cosmetics
+
+Hold `E` at a gunsmith bench in `Config.Cosmetics.Stations` to change the look of
+an equipped weapon: grips, engravings, materials, tints, wraps and straps. A
+floating model in front of the player previews each part, with camera views,
+zoom, rotate left/right and up/down. **Save Changes** stores the look in the
+weapon item's `metadata.cosmetics` as `{ [category] = nativeComponentName }`,
+through the same revision-checked Inventory transaction as maintenance, so the
+look travels with the item and is removed with it. Functional attachments stay
+in `metadata.attachments` and are never offered there.
+
+Files: `config_cosmetics.lua`, `shared/cosmetics/`, `server/services/cosmetics.lua`,
+`client/cosmetics/` and `translations/cosmetics_*.lua` (keys are registered with
+a `cosmetics_` prefix). Tests: `lua tests/cosmetics.lua`.
 
 ## Current revolver settings
 

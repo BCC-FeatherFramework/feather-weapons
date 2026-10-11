@@ -204,6 +204,7 @@ function ReconciliationService.InspectMetadata(source)
                 ammoPools = item.metadata.ammo.pools,
                 reserve = item.metadata.ammo.reserve,
                 attachments = item.metadata.attachments or {},
+                cosmetics = item.metadata.cosmetics or {},
                 runtimeMatches = runtimeItem ~= nil
                     and poolsMatch
                     and tostring(runtimeItem.itemInstanceId) == tostring(item.id)

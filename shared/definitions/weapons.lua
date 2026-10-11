@@ -605,10 +605,12 @@ WeaponDefinitionCatalog.weapons = {
             }
         },
         attachmentSlots = {
-            sight = { "rollingblock_wide_sight" }
+            sight = { "rollingblock_wide_sight" },
+            scope = { "rollingblock_scope_03", "rollingblock_scope_04" }
         },
         attachmentDefaults = {
-            sight = "Standard Narrow Sight"
+            sight = "Standard Narrow Sight",
+            scope = "Standard Scope"
         },
         policies = {
             transferable = true,

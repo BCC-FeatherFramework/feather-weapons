@@ -327,6 +327,33 @@ WeaponDefinitionCatalog.attachments = {
         removable = true,
         tags = { "functional", "elephant" }
     },
+    -- Scope candidates for the Rolling Block. The rifle ships with a native
+    -- scope; these replace it. Live gate pending (docs/rollingblock-scope-live-gate.md):
+    -- labels describe the native component until the in-game look is confirmed.
+    rollingblock_scope_03 = {
+        id = "rollingblock_scope_03",
+        kind = "attachment",
+        itemName = "rollingblock_scope_03",
+        label = "Rolling Block Scope (Type 3)",
+        slot = "scope",
+        nativeComponentName = "COMPONENT_RIFLE_SCOPE03",
+        conflicts = {},
+        prerequisites = {},
+        removable = true,
+        tags = { "functional", "rollingblock", "scope" }
+    },
+    rollingblock_scope_04 = {
+        id = "rollingblock_scope_04",
+        kind = "attachment",
+        itemName = "rollingblock_scope_04",
+        label = "Rolling Block Scope (Type 4)",
+        slot = "scope",
+        nativeComponentName = "COMPONENT_RIFLE_SCOPE04",
+        conflicts = {},
+        prerequisites = {},
+        removable = true,
+        tags = { "functional", "rollingblock", "scope" }
+    },
     rollingblock_wide_sight = {
         id = "rollingblock_wide_sight",
         kind = "attachment",

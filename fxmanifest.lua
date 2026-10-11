@@ -10,13 +10,18 @@ version '0.15.0'
 
 shared_scripts {
     'config.lua',
+    'config_cosmetics.lua',
     '/shared/constants.lua',
     '/shared/errors.lua',
     '/shared/definitions/ammunition.lua',
     '/shared/definitions/attachments.lua',
     '/shared/definitions/weapons.lua',
     '/shared/validation.lua',
-    '/shared/ammunition_pools.lua'
+    '/shared/ammunition_pools.lua',
+    '/shared/cosmetics/definitions/components.lua',
+    '/shared/cosmetics/definitions/shared_components.lua',
+    '/shared/cosmetics/definitions/shared_groups.lua',
+    '/shared/cosmetics/catalog.lua'
 }
 
 server_scripts {
@@ -39,6 +44,8 @@ server_scripts {
     '/server/services/issuance.lua',
     '/server/services/commands.lua',
     '/server/services/reconciliation.lua',
+    '/server/services/cosmetics.lua',
+    '/server/services/chat_suggestions.lua',
     '/server/services/api.lua',
     '/server/main.lua'
 }
@@ -50,6 +57,15 @@ client_scripts {
     '/client/native_weapon_coordinator.lua',
     '/client/firearm_pools.lua',
     '/client/main.lua',
+    '/client/inspect.lua',
+    '/client/cosmetics/imports.lua',
+    '/translations/cosmetics_en_us.lua',
+    '/translations/cosmetics_ro.lua',
+    '/client/cosmetics/apply.lua',
+    '/client/cosmetics/preview.lua',
+    '/client/cosmetics/menu.lua',
+    '/client/cosmetics/stations.lua',
+    '/client/cosmetics/placement.lua',
     '/client/native_probe.lua'
 }
 
@@ -64,5 +80,6 @@ dependencies {
     'feather-core',
     'feather-character',
     'feather-inventory',
-    'feather-menu-v2'
+    'feather-menu-v2',
+    'feather-toolkit'
 }

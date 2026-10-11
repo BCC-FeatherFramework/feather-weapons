@@ -1024,7 +1024,7 @@ RegisterCommand("WeaponReleaseContractSmokeTest", function(source, args)
                 passed = capabilities.ready == true
                     and capabilities.definitions.weapon == 49
                     and capabilities.definitions.ammunition == 43
-                    and capabilities.definitions.attachment == 38,
+                    and capabilities.definitions.attachment == 40,
                 detail = ("weapon=%s ammunition=%s attachment=%s"):format(
                     tostring(capabilities.definitions.weapon),
                     tostring(capabilities.definitions.ammunition),

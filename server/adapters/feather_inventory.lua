@@ -78,17 +78,18 @@ local function BuildDefinitionIndex()
     end
 
     MissingDefinitions = {}
+    -- Item name -> what needs it, for the startup report below.
     local required = {
-        gun_oil = true
+        gun_oil = "repair material"
     }
     for itemName in pairs(WeaponDefinitionCatalog.ammunition or {}) do
-        required[itemName] = true
+        required[itemName] = "ammunition " .. itemName
     end
-    for _, attachment in pairs(WeaponDefinitionCatalog.attachments or {}) do
-        required[attachment.itemName] = true
+    for id, attachment in pairs(WeaponDefinitionCatalog.attachments or {}) do
+        required[attachment.itemName] = "attachment " .. id
     end
-    for _, definition in pairs(WeaponDefinitionCatalog.weapons or {}) do
-        required[definition.itemName] = true
+    for id, definition in pairs(WeaponDefinitionCatalog.weapons or {}) do
+        required[definition.itemName] = "weapon " .. id
     end
     for name in pairs(required) do
         if not DefinitionIds[name] then MissingDefinitions[#MissingDefinitions + 1] = name end
@@ -96,9 +97,49 @@ local function BuildDefinitionIndex()
     table.sort(MissingDefinitions)
 
     if #MissingDefinitions > 0 then
-        return Failure(nil, "Required Inventory item definitions are missing", {
-            missing = MissingDefinitions
-        })
+        -- Readable report. feather-inventory's item list is checked above; the
+        -- database is checked here too, to tell apart items that are not in the
+        -- `items` table at all from items feather-inventory has not loaded yet.
+        local inDatabase, checked = {}, false
+        local placeholders = string.rep("?", #MissingDefinitions, ", ")
+        local called, rows = pcall(DB.query,
+            ("SELECT `name` FROM `items` WHERE `name` IN (%s)"):format(placeholders),
+            table.unpack(MissingDefinitions))
+        if called and type(rows) == "table" then
+            checked = true
+            for _, row in ipairs(rows) do inDatabase[row.name] = true end
+        end
+        local notInDatabase, notLoaded = {}, {}
+        for _, name in ipairs(MissingDefinitions) do
+            if checked and inDatabase[name] then
+                notLoaded[#notLoaded + 1] = name
+            else
+                notInDatabase[#notInDatabase + 1] = name
+            end
+        end
+
+        -- A warning, not a startup failure: everything else works, and what
+        -- needs a missing item fails cleanly (cannot be given or installed).
+        print(("^3[feather-weapons] warning: %d item definition(s) are not available; what needs them cannot be given or installed until they are added:^7")
+            :format(#MissingDefinitions))
+        if #notInDatabase > 0 then
+            print(checked and "^3  Not in the database (`items` table):^7"
+                or ("^3  Could not check the database (%s); not loaded by feather-inventory:^7")
+                    :format(tostring(rows)))
+            for _, name in ipairs(notInDatabase) do
+                print(("^3    - %s^7  (%s)"):format(name, required[name]))
+            end
+            print("^3    Fix: import sql/install_items.sql (or the matching sql/add_*.sql),^7")
+            print("^3    then restart feather-inventory and feather-weapons.^7")
+        end
+        if #notLoaded > 0 then
+            print("^3  In the database but not loaded by feather-inventory:^7")
+            for _, name in ipairs(notLoaded) do
+                print(("^3    - %s^7  (%s)"):format(name, required[name]))
+            end
+            print("^3    Fix: restart feather-inventory (it read its items before these were added),^7")
+            print("^3    then restart feather-weapons.^7")
+        end
     end
     if next(DuplicateDefinitions) ~= nil then
         return Failure(nil, "Duplicate Inventory item definitions are not supported", {
@@ -121,6 +162,7 @@ local function BuildDefinitionIndex()
     local mismatches = {}
     for name, rules in pairs(expected) do
         local definition = definitionsByName[name]
+        if not definition then goto nextExpected end -- missing: reported above
         local usable = definition.usable == true or tonumber(definition.usable) == 1
         local actualMode = definition.instanceMode or definition.instance_mode
         if actualMode ~= rules.instanceMode or usable ~= rules.usable or definition.type ~= rules.type then
@@ -130,6 +172,7 @@ local function BuildDefinitionIndex()
                 actual = { instanceMode = actualMode, usable = usable, type = definition.type }
             }
         end
+        ::nextExpected::
     end
     if #mismatches > 0 then
         return Failure(nil, "Inventory item definitions do not match the Weapons contract", {

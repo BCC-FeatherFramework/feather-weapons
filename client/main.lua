@@ -2344,6 +2344,35 @@ function FeatherWeaponsClient.Repair(slot, callback)
     end)
 end
 
+-- Saves the latest native wear first so the server sees dirt and soot picked
+-- up since the last checkpoint, then runs the normal repair transaction.
+function FeatherWeaponsClient.Clean(slot, callback)
+    local state = SlotState(slot)
+    if not state then
+        if callback then callback({ ok = false, error = { message = 'No weapon is equipped in that slot.' } }) end
+        return
+    end
+
+    SyncSlotMaintenance(slot, state, function()
+        FeatherWeaponsClient.Repair(slot, callback)
+    end)
+end
+
+-- Loadout slot and state of the weapon currently in the player's hands.
+function FeatherWeaponsClient.HeldWeapon()
+    local present, current = GetCurrentPedWeapon(PlayerPedId(), true, 0, false)
+    if not NativeTrue(present) or current == joaat('WEAPON_UNARMED') then return nil end
+    for _, slot in ipairs(WeaponConstants.LoadoutSlots) do
+        local state = SlotState(slot)
+        if state and state.nativeWeaponName and joaat(state.nativeWeaponName) == current then
+            return slot, state
+        end
+    end
+    return nil
+end
+
+FeatherWeaponsClient.Notify = Notify
+
 local function UseInventoryWeaponFromAuthoritativeState(itemInstanceId)
     for _, slot in ipairs(extraSlotNames) do
         local state = extraSlots[slot]
