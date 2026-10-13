@@ -11,6 +11,41 @@ local function Notify(source, message, duration)
     end
 end
 
+-- Dedicated alpha test character only. Uses normal durable issuance receipts;
+-- does not enroll, equip, grant ammunition, or activate the native runtime.
+RegisterCommand('WeaponNativeTestPrepare',function(source,args)
+    local characterId='6a2fd060-c46f-11f1-9ae2-e0d55eaa2deb'
+    if source~=0 or Config.DevMode~=true then return end
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true
+        or GetResourceState('feather-weapons-native-proof')~='stopped' then
+        print('[WeaponNativeTestPrepare] BLOCKED: proof must be stopped and native flags disabled'); return
+    end
+    local target=tonumber(args and args[1])
+    if not target or target<1 or target%1~=0 or not args or args[2]~=characterId then
+        print('[WeaponNativeTestPrepare] BLOCKED: explicit playerId and approved Jane Doe UUID required'); return
+    end
+    local session=CoreAdapter.ResolveSession(target)
+    if type(session)~='table' or not session.ok or type(session.value)~='table'
+        or session.value.characterId~=characterId
+        or not CoreAdapter.IsSessionCurrent(target,session.value.sessionId,characterId) then
+        print('[WeaponNativeTestPrepare] BLOCKED: target is not the current approved test character'); return
+    end
+    local result=IssuanceService.Issue({
+        characterId=characterId,sessionId=session.value.sessionId,
+        resource='feather-weapons',reason='development_grant',
+        correlationId='native-test-jane-cattleman-v1',
+    },{
+        characterId=characterId,definitionId='revolver_cattleman',purpose='development_grant',
+        requestId='native-test-jane-cattleman-v1',
+        provenance={type='development_grant',reference='native-test-jane-cattleman-v1'},
+    },'feather-weapons')
+    if type(result)~='table' or not result.ok or type(result.value)~='table' then
+        print('[WeaponNativeTestPrepare] FAIL issuance; inspect server errors before retry'); return
+    end
+    print(('[WeaponNativeTestPrepare] PASS characterId=%s item=%s replayed=%s; one Cattleman issued through durable receipt; no equip/ammo/enrollment requested'):format(
+        characterId,tostring(result.value.itemInstanceId),tostring(result.value.replayed==true)))
+end,true)
+
 RegisterCommand("WeaponCharacterIdentitySmokeTest", function(source, args)
         if source ~= 0 then return end
         local targetSource = tonumber(args and args[1])

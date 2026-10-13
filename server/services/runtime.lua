@@ -450,6 +450,7 @@ function WeaponRuntime.PromoteOffhand(source, sessionId, correlationId)
 end
 
 AddEventHandler("core.session.ready.v1", function(session)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then return end
     local characterId = session and CoreAdapter.NormalizeCharacterId(session.characterId)
     if not characterId then return end
     session.characterId = characterId

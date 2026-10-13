@@ -1,3 +1,10 @@
+-- Staging quarantine: never run the hybrid owner alongside character ammo.
+-- This disables the whole old client (including non-firearms), not a completed
+-- native replacement. Flags stay false until native/non-firearm hosting is ready.
+if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+    print('[feather-weapons] hybrid client disabled: native cutover staging; production host not ready')
+    return
+end
 FeatherWeaponsClient = {}
 local clientContract = 4
 local equipped, offhand, pendingToken, pendingNativeWeaponName = nil, nil, nil, nil
@@ -53,6 +60,29 @@ local characterRestoreComplete = false
 local characterRestoreAttempts = 0
 local firearmPoolsInFlight = false
 local firearmPoolsEpoch = 0
+
+local recoverySuspended = false
+local BeginDeathPoolCheckpoint
+local deathPoolCheckpointPending = false
+local deathPoolCheckpointFailed = false
+local function SuspendForDeath()
+    if not recoverySuspended and BeginDeathPoolCheckpoint then
+        BeginDeathPoolCheckpoint()
+    end
+    recoverySuspended = true
+end
+local function LifeStateSuspended()
+    local dead = IsEntityDead(PlayerPedId())
+    if dead == true or dead == 1 then SuspendForDeath(); return true end
+    if GetResourceState('feather-medical') == 'started' then
+        local called, result = pcall(function() return exports['feather-medical']:GetLifeState() end)
+        if called and result and result.ok and result.value.lifeState ~= 'alive' then
+            SuspendForDeath()
+            return true
+        end
+    end
+    return recoverySuspended
+end
 
 local function FirearmPoolModuleReady()
     return type(FeatherFirearmPools) == 'table'
@@ -630,12 +660,13 @@ local function RestoreApprovedNativePair(primary, secondary)
         if attempt == 1 then LogClipWrite('after-secondary', secondaryWritten) end
         local primaryOk, observedPrimaryLoaded = GetAmmoInClip(ped, primaryHash)
         local secondaryOk, observedSecondaryLoaded = GetAmmoInClip(ped, secondaryHash)
-        primaryReady = (primaryAmmo == 0 and primaryLoaded == 0)
-            or (NativeTrue(primaryOk)
-                and math.max(0, math.floor(tonumber(observedPrimaryLoaded) or 0)) == primaryLoaded)
-        secondaryReady = (secondaryAmmo == 0 and secondaryLoaded == 0)
-            or (NativeTrue(secondaryOk)
-                and math.max(0, math.floor(tonumber(observedSecondaryLoaded) or 0)) == secondaryLoaded)
+        -- Empty ownership is not proof that a native weapon materialized.
+        -- Require a readable zero clip too, otherwise an absent empty hand
+        -- bypasses the activation retry and restore incorrectly reports success.
+        primaryReady = NativeTrue(primaryOk)
+            and math.max(0, math.floor(tonumber(observedPrimaryLoaded) or 0)) == primaryLoaded
+        secondaryReady = NativeTrue(secondaryOk)
+            and math.max(0, math.floor(tonumber(observedSecondaryLoaded) or 0)) == secondaryLoaded
         if primaryReady and secondaryReady then break end
         -- A cold restore or a rebuild after single-hand fallback can leave one
         -- weapon present in Inventory but without a hash-addressable clip.
@@ -854,8 +885,12 @@ local function FirearmPoolsActive()
     return next(FirearmPoolSlots()) ~= nil
 end
 
-local function FlushFirearmPools(callback)
+local function FlushFirearmPools(callback, deathBoundary)
     callback = callback or function() end
+    if not deathBoundary and LifeStateSuspended() then
+        callback({ok = true, value = {deferred = true, reason = 'character_not_alive'}})
+        return
+    end
     if not FirearmPoolModuleReady() then
         callback({ ok = false, error = { code = 'firearm_pool_module_missing',
             message = 'Deploy client/firearm_pools.lua, shared/ammunition_pools.lua and the updated fxmanifest.lua.' } })
@@ -866,7 +901,7 @@ local function FlushFirearmPools(callback)
     -- a multi-item pool batch overlap a single-item maintenance write produced
     -- repeatable InnoDB deadlocks under live firing checkpoints.
     if firearmPoolsInFlight or maintenanceBatchInFlight then
-        SetTimeout(50, function() FlushFirearmPools(callback) end)
+        SetTimeout(50, function() FlushFirearmPools(callback, deathBoundary) end)
         return
     end
     local capture, failure, detail = FeatherFirearmPools.Capture(PlayerPedId(), WeaponDefinitionCatalog)
@@ -913,8 +948,43 @@ local function FlushFirearmPools(callback)
     end)
 end
 
+-- One final bounded pool observation before dead-state suspension. Native clip
+-- losses must still exactly explain shared pool losses via Capture/Allocate.
+BeginDeathPoolCheckpoint = function()
+    if not FirearmPoolsActive() or deathPoolCheckpointPending then return end
+    deathPoolCheckpointPending = true
+    deathPoolCheckpointFailed = false
+    local epoch, generation = firearmPoolsEpoch, characterRestoreGeneration
+    local attempts = 0
+    local function drain()
+        if epoch ~= firearmPoolsEpoch or generation ~= characterRestoreGeneration then
+            deathPoolCheckpointPending = false
+            return
+        end
+        if firearmPoolsInFlight or maintenanceBatchInFlight then
+            SetTimeout(50, drain)
+            return
+        end
+        attempts = attempts + 1
+        FlushFirearmPools(function(result)
+            if result and result.ok then
+                deathPoolCheckpointPending = false
+                print('[feather-weapons] death pool checkpoint PASS')
+            elseif attempts < 3 then
+                SetTimeout(100, drain)
+            else
+                -- Fail closed: recovery must not restore stale ownership.
+                deathPoolCheckpointFailed = true
+                print('[feather-weapons] death pool checkpoint FAILED; recovery restore blocked')
+            end
+        end, true)
+    end
+    SetTimeout(0, drain)
+end
+
 CreateThread(function()
     while true do
+        while LifeStateSuspended() do Wait(100) end
         Wait(250)
         if characterRestoreComplete and not characterRestoreInFlight
             and not inventoryWeaponInFlight and not logoutCheckpointInFlight then
@@ -1249,6 +1319,7 @@ local function SyncSlotMaintenance(slot, state, callback)
 end
 
 local function CheckpointMaintenance(callback)
+    if LifeStateSuspended() then callback({ok = true, value = {deferred = true}}); return end
     if maintenanceBatchInFlight or firearmPoolsInFlight then
         callback({ ok = true, value = { deferred = true } })
         return
@@ -1370,6 +1441,7 @@ local function ApplyApprovedWeapon(approved)
 end
 
 local function FlushConsumption()
+    if LifeStateSuspended() then return end
     if FirearmPoolsActive() then FlushFirearmPools(ResolveCheckpointWaiters); return end
     if maintenanceSyncInFlight.primary then
         SetTimeout(50, FlushConsumption)
@@ -1469,6 +1541,7 @@ local function FlushConsumption()
 end
 
 local function CaptureNativeState()
+    if LifeStateSuspended() then return end
     if not equipped then return true end
 
     local ped = PlayerPedId()
@@ -1517,6 +1590,7 @@ local function CapturePairNativeState()
 end
 
 FlushPairConsumption = function()
+    if LifeStateSuspended() then return end
     if FirearmPoolsActive() then FlushFirearmPools(ResolveCheckpointWaiters); return end
     local cooldown = inventoryMutationCooldownUntil - GetGameTimer()
     if cooldown > 0 then
@@ -1693,6 +1767,10 @@ end
 
 function FeatherWeaponsClient.Checkpoint(callback, skipExtras)
     callback = type(callback) == 'function' and callback or function(_result) end
+    if LifeStateSuspended() then
+        callback({ok = true, value = {deferred = true, reason = 'character_not_alive'}})
+        return
+    end
 
     if FirearmPoolsActive() and not skipExtras then
         FlushFirearmPools(function(result)
@@ -2000,6 +2078,10 @@ local function ThrowablePoolReady(slot, state, observed)
 end
 
 FlushExtraSlot = function(slot, callback)
+    if LifeStateSuspended() then
+        if callback then callback({ok = true, value = {deferred = true}}) end
+        return
+    end
     -- A partial/failed restore exposes transient zero native pools. Never
     -- persist those as shots while character startup is still rebuilding.
     if characterRestoreInFlight or not characterRestoreComplete then
@@ -3508,6 +3590,7 @@ end
 CreateThread(function()
     local interval = math.max(1000, math.floor(tonumber(Config.Runtime and Config.Runtime.maintenanceCheckpointMs) or 5000))
     while true do
+        while LifeStateSuspended() do Wait(100) end
         Wait(interval)
         CheckpointMaintenance(function() end)
     end
@@ -3521,6 +3604,7 @@ CreateThread(function()
     local fireWindowUntil = 0
 
     while true do
+        while LifeStateSuspended() do Wait(100) end
         if equipped and not offhand and desiredAmmo ~= nil and singleNativeReady
             and not presentationRestoreInFlight and not FirearmPoolsActive() then
             local ped = PlayerPedId()
@@ -3609,6 +3693,7 @@ CreateThread(function()
     local checkpointDebounce = math.max(0, math.floor(tonumber(runtimeConfig.checkpointDebounceMs) or 250))
 
     while true do
+        while LifeStateSuspended() do Wait(100) end
         if equipped and offhand and pairObserved and not presentationRestoreInFlight and not FirearmPoolsActive() then
             local ped = PlayerPedId()
             if IsDualSidearmPair(equipped, offhand) and not pairSingleFallback
@@ -3691,6 +3776,7 @@ CreateThread(function()
     local attributedShotSequence = 0
     local shotWeapon
     while true do
+        while LifeStateSuspended() do Wait(100) end
         local active = false
         local ped = PlayerPedId()
         local selectedOk, selectedWeapon = GetCurrentPedWeapon(ped, true, 0, false)
@@ -3806,8 +3892,42 @@ end)
 -- RedM cannot keep a reserve visible for two different long-gun hashes that
 -- share an ammunition type. Expose only the selected weapon's reload amount,
 -- then return the native pool to the combined clips when the animation ends.
+-- Empty longguns must not see another item's native reserve. The pool module
+-- tracks hidden escrow and rematerializes the funded clip on switch-back.
 CreateThread(function()
     while true do
+        while LifeStateSuspended() do Wait(100) end
+        local ped = PlayerPedId()
+        local selectedOk, selectedWeapon = GetCurrentPedWeapon(ped, true, 0, false)
+        local blocked
+        if NativeTrue(selectedOk) and not characterRestoreInFlight
+            and not presentationRestoreInFlight and not inventoryWeaponInFlight
+            and not firearmPoolsInFlight and not maintenanceBatchInFlight then
+            FeatherFirearmPools.UpdateLonggunWindow(ped, selectedWeapon, WeaponDefinitionCatalog)
+            for _, slot in ipairs({ 'shoulder', 'back' }) do
+                local state = extraSlots[slot]
+                local other = extraSlots[slot == 'shoulder' and 'back' or 'shoulder']
+                if state and state.ammoPools and other
+                    and state.nativeAmmoName == other.nativeAmmoName
+                    and selectedWeapon == joaat(state.nativeWeaponName)
+                    and (state.ammoPools[state.ammunitionType] or 0) == 0
+                    and (other.ammo or 0) > 0 then
+                    blocked = state
+                    break
+                end
+            end
+        end
+        if blocked then
+            DisableControlAction(0, joaat('INPUT_RELOAD'), true)
+            DisableControlAction(0, joaat('INPUT_ATTACK'), true)
+        end
+        Wait(0)
+    end
+end)
+
+CreateThread(function()
+    while true do
+        while LifeStateSuspended() do Wait(100) end
         local ped = PlayerPedId()
         local selectedOk, selectedWeapon = GetCurrentPedWeapon(ped, true, 0, false)
         local selectedSlot, selectedState
@@ -3915,6 +4035,7 @@ end)
 
 CreateThread(function()
     while true do
+        while LifeStateSuspended() do Wait(100) end
         if equipped and equipped.attachments and #equipped.attachments > 0 and GetGameTimer() < attachmentReconcileUntil then
             ApplyNativeAttachments(equipped.nativeWeaponName, equipped.attachments)
             Wait(500)
@@ -3956,6 +4077,7 @@ local function BeginCharacterRestoreWindow(reason)
 end
 
 RestoreRuntimeWeapons = function(reason)
+    if LifeStateSuspended() then return end
     if characterRestoreComplete or characterRestoreInFlight or not CharacterIsActive() then
         return
     end
@@ -4039,6 +4161,41 @@ AddEventHandler('feather-character:client:runtime-ready.v1', function()
     RestoreRuntimeWeapons('character-runtime-ready')
 end)
 
+AddEventHandler('feather-medical:client:condition-changed.v1', function()
+    local called, result = pcall(function() return exports['feather-medical']:GetLifeState() end)
+    if not called or not result or not result.ok then return end
+    if result.value.lifeState ~= 'alive' then
+        SuspendForDeath()
+        return
+    end
+    if recoverySuspended then
+        if deathPoolCheckpointPending then
+            if deathPoolCheckpointFailed then
+                print('[feather-weapons] recovery restore blocked by failed death pool checkpoint')
+                return
+            end
+            print('[feather-weapons] recovery waiting for death pool checkpoint')
+            SetTimeout(100, function()
+                TriggerEvent('feather-medical:client:condition-changed.v1')
+            end)
+            return
+        end
+        recoverySuspended = false
+        BeginCharacterRestoreWindow('medical-recovery')
+        local generation = characterRestoreGeneration
+        local function RestoreAfterWrites()
+            if generation ~= characterRestoreGeneration or LifeStateSuspended() then return end
+            if firearmPoolsInFlight or syncInFlight or pairSyncInFlight or maintenanceBatchInFlight
+                or extraSyncInFlight.shoulder or extraSyncInFlight.back then
+                SetTimeout(50, RestoreAfterWrites)
+                return
+            end
+            RestoreRuntimeWeapons('medical-recovery')
+        end
+        RestoreAfterWrites()
+    end
+end)
+
 RegisterNetEvent('feather-weapons:client:runtime-ready', function()
     RestoreRuntimeWeapons('weapons-runtime-ready')
 end)
@@ -4048,6 +4205,7 @@ CreateThread(function()
     local retryAfter = 0
     local retryEpoch
     while true do
+        while LifeStateSuspended() do Wait(100) end
         Wait(100)
         if characterRestoreComplete and FirearmPoolsActive() and not firearmPoolsInFlight
             and not characterRestoreInFlight and not presentationRestoreInFlight
@@ -4074,6 +4232,8 @@ CreateThread(function()
 end)
 
 AddEventHandler('Feather:Character:Logout', function()
+    recoverySuspended = false
+    deathPoolCheckpointPending, deathPoolCheckpointFailed = false, false
     characterRestoreGeneration = characterRestoreGeneration + 1
     characterRestoreInFlight = false
     characterRestoreComplete = false
@@ -4177,6 +4337,35 @@ AddEventHandler('onResourceStop', function(resourceName)
 end)
 
 if Config.DevMode then
+    -- Read-only context for the opt-in death timing harness.
+    function FeatherWeaponsClient.GetShotDeathContext(mode)
+        if mode == 'longguns' then
+            local shoulder, back = extraSlots.shoulder, extraSlots.back
+            if not shoulder or not back or LifeStateSuspended()
+                or not shoulder.nativeAmmoName
+                or shoulder.nativeAmmoName ~= back.nativeAmmoName then return nil end
+            local selectedOk, selectedHash = GetCurrentPedWeapon(PlayerPedId(), true, 0, true)
+            if not NativeTrue(selectedOk) or (selectedHash ~= joaat(shoulder.nativeWeaponName)
+                and selectedHash ~= joaat(back.nativeWeaponName)) then return nil end
+            return {
+                primary = shoulder.itemInstanceId, offhand = back.itemInstanceId,
+                primaryGeneration = shoulder.generation, offhandGeneration = back.generation,
+                epoch = firearmPoolsEpoch, restoreGeneration = characterRestoreGeneration,
+                ammoHash = joaat(shoulder.nativeAmmoName), selectedHash = selectedHash,
+                expected = (shoulder.ammo or 0) + (back.ammo or 0)
+            }
+        end
+        if not equipped or not offhand or LifeStateSuspended()
+            or equipped.nativeAmmoName ~= offhand.nativeAmmoName
+            or not equipped.nativeAmmoName then return nil end
+        return {
+            primary = equipped.itemInstanceId, offhand = offhand.itemInstanceId,
+            primaryGeneration = equipped.generation, offhandGeneration = offhand.generation,
+            epoch = firearmPoolsEpoch, restoreGeneration = characterRestoreGeneration,
+            ammoHash = joaat(equipped.nativeAmmoName),
+            expected = (equipped.ammo or 0) + (offhand.ammo or 0)
+        }
+    end
     print(('[feather-weapons] client contract=%d dualSlots=true primaryPromotion=true'):format(clientContract))
 
     RegisterCommand('weaponmaintenance', function()

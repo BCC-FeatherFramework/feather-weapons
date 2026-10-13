@@ -1,4 +1,5 @@
 local settings = Config.NativeProbe or {}
+if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then return end
 
 if Config.DevMode ~= true or settings.enabled ~= true then return end
 

@@ -1,6 +1,15 @@
 # Feather Weapons
 
-Feather Weapons is the database-backed weapon system for the Feather Framework. Weapons are unique inventory item instances; their loaded ammunition, condition, and identity live in item metadata, while equipped state is stored per character.
+Feather Weapons is the database-backed weapon system for the Feather Framework.
+Weapons are unique inventory item instances with persistent identity and condition;
+equipped state is stored per character. The existing default runtime uses item
+ammunition metadata. The separately gated native alpha uses character-owned shared
+ammunition pools instead, without per-weapon ammunition quantities.
+
+The shared-pool native path is **disabled by default and development-scoped**, not
+a general production cutover. See [native alpha integration](docs/native-alpha-integration.md)
+for prerequisites, accepted tests and remaining limitations. When enabled it
+quarantines legacy gameplay instead of running both ownership models together.
 
 Server operation, recovery, integration, and trust boundaries are documented in
 [`docs/operations.md`](docs/operations.md).

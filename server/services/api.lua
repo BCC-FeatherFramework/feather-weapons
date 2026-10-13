@@ -1,6 +1,15 @@
 WeaponAPI = {}
 
 function WeaponAPI.GetCapabilities()
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return {contractVersion=WeaponConstants.ContractVersion,
+            ready=Config.DevMode==true and Config.NativeAlphaRuntime==true
+                and WeaponCharacterAmmoInventoryProvider.Status()=='ready',
+            definitions=DefinitionRegistry.Counts(),
+            features={nativeAlphaFirearms=true,scopedCharacterOnly=true,
+                legacyGameplay=false,equip=false,ammunitionManagement=false,repair=false,
+                attachmentTransactions=false,productionReady=false}}
+    end
     return {
         contractVersion = WeaponConstants.ContractVersion,
         ready = DefinitionRegistry.IsReady(),

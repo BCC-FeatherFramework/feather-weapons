@@ -97,6 +97,16 @@ function WeaponMetadata.Build(definition, options)
 end
 
 function WeaponMetadata.Validate(metadata, definition, correlationId)
+    if type(metadata)=='table' and type(metadata.ammo)=='table' and metadata.ammo.ownership=='character' then
+        if Config.CharacterAmmunitionEnabled~=true then
+            return WeaponResult.Error(WeaponErrors.ITEM_INVALID,'Character ammunition integration is disabled',nil,correlationId)
+        end
+        local checked,reason,errors=WeaponCharacterAmmoItem.Validate(metadata,definition)
+        if not checked then return WeaponResult.Error(WeaponErrors.ITEM_INVALID,reason,errors,correlationId) end
+        local attachments=DefinitionRegistry.ValidateAttachmentSet(definition.id,checked.attachments)
+        if not attachments.ok then return attachments end
+        return WeaponResult.Ok(checked,correlationId)
+    end
     -- Retire only the explicitly rejected candidate's empty, unselected key.
     -- Never discard nonzero ownership or silently change a retired selection.
     if definition.id == 'throwable_throwing_knives' and type(metadata) == 'table'

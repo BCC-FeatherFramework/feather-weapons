@@ -256,6 +256,9 @@ local function SelectAmmunition(source, rpcContext, ammunitionType)
 end
 
 function AmmoService.NormalizeSharedPools(source, rpcContext)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local runtime = WeaponRuntime.Get(source)
     if not runtime or runtime.sessionId ~= rpcContext.sessionId or not runtime.slots then
         return WeaponResult.Error(WeaponErrors.SESSION_EXPIRED,
@@ -349,6 +352,9 @@ function AmmoService.NormalizeSharedPools(source, rpcContext)
 end
 
 function AmmoService.Escrow(source, rpcContext, amount, ammunitionType)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local selection = SelectAmmunition(source, rpcContext, ammunitionType)
     if not selection.ok then return selection end
     local runtime = WeaponRuntime.Get(source)
@@ -380,6 +386,9 @@ function AmmoService.Escrow(source, rpcContext, amount, ammunitionType)
 end
 
 function AmmoService.LoadSlot(source, rpcContext, params)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     params = type(params) == 'table' and params or {}
     local slot = WeaponRuntime.NormalizeSlot(params.slot)
     local equipped, failure = GetEquipped(source, rpcContext, slot)
@@ -507,6 +516,9 @@ function AmmoService.LoadSlot(source, rpcContext, params)
 end
 
 function AmmoService.SwitchSlot(source, rpcContext, params)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     params = type(params) == 'table' and params or {}
     local slot = WeaponRuntime.NormalizeSlot(params.slot)
     local equipped, failure = GetEquipped(source, rpcContext, slot)
@@ -650,6 +662,9 @@ function AmmoService.SwitchSlot(source, rpcContext, params)
 end
 
 function AmmoService.GetInventoryAvailability(source, rpcContext)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local runtime = WeaponRuntime.Get(source)
     if not runtime or runtime.sessionId ~= rpcContext.sessionId then
         return WeaponResult.Error(WeaponErrors.SESSION_EXPIRED,
@@ -688,6 +703,9 @@ function AmmoService.GetInventoryAvailability(source, rpcContext)
 end
 
 function AmmoService.Unload(source, rpcContext, requested, requestedSlot, lease)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local runtime = WeaponRuntime.Get(source)
     local slots = runtime and runtime.slots or nil
     local slot = WeaponRuntime.NormalizeSlot(requestedSlot)
@@ -821,6 +839,9 @@ end
 -- Multi-type checkpoints may consume existing ownership, never mint native
 -- pickups. Poison-to-Regular recovery needs a separate exactly-once ledger.
 function AmmoService.SyncPools(source, rpcContext, params)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local slot = WeaponRuntime.NormalizeSlot(params and params.slot)
     local equipped, failure = GetEquipped(source, rpcContext, slot)
     if not equipped then return failure end
@@ -892,6 +913,9 @@ end
 -- Commit a shared-pool observation atomically across item leases. A failure in
 -- either hand must not consume the first hand while retaining the second.
 function AmmoService.SyncPoolBatch(source, rpcContext, params)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local reports = type(params) == 'table' and params.slots or nil
     if type(reports) ~= 'table' then
         return WeaponResult.Error(WeaponErrors.ITEM_INVALID, 'Pool batch requires slot reports')
@@ -985,6 +1009,9 @@ function AmmoService.SyncPoolBatch(source, rpcContext, params)
 end
 
 function AmmoService.SyncConsumption(source, rpcContext, params)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local slot = WeaponRuntime.NormalizeSlot(params and params.slot) or 'primary'
     local equipped, failure = GetEquipped(source, rpcContext, slot)
     if not equipped then return failure end
@@ -1070,6 +1097,9 @@ function AmmoService.SyncConsumption(source, rpcContext, params)
 end
 
 function AmmoService.SyncPair(source, rpcContext, params)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local runtime = WeaponRuntime.Get(source)
     local slots = runtime and runtime.slots or nil
     params = type(params) == 'table' and params or {}

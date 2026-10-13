@@ -9,6 +9,9 @@ local function Unit(value)
 end
 
 function MaintenanceService.Sync(source, rpcContext, params)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     params = type(params) == "table" and params or {}
     local slot = WeaponRuntime.NormalizeSlot(params.slot)
     local runtime = WeaponRuntime.Get(source)

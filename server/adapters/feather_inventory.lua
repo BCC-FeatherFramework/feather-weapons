@@ -650,6 +650,9 @@ local function RegisterGuards()
     -- treating an unanswerable question as "not equipped" would let an
     -- equipped weapon leave the inventory while the game still holds it.
     local function WeaponGuard(instance)
+        if WeaponCharacterAmmoService and WeaponCharacterAmmoService.IsNativeItemBound(instance.id) then
+            return false, "Native loadout still owns this item; complete its release first."
+        end
         local equipped = Inventory.Equipment.IsInstanceEquipped(instance.id)
         if not equipped.ok then
             return false, "Unable to verify equipped state."
@@ -676,6 +679,14 @@ local function RegisterGuards()
             { reason = type(destroy) == "table" and destroy.error and destroy.error.message or nil })
     end
 
+    if not IsCallable(Inventory.Guards.RegisterInstanceChangeGuard) then
+        return Failure(nil, 'Inventory item-lifetime guard API is unavailable')
+    end
+    local change=Inventory.Guards.RegisterInstanceChangeGuard('feather-weapons',
+        WeaponCharacterAmmoLoadoutLease.Guard(function(id)
+            return WeaponCharacterAmmoService and WeaponCharacterAmmoService.IsNativeItemBound(id)==true
+        end))
+    if type(change)~='table' or change.ok~=true then return Failure(nil,'Item-lifetime guard registration failed') end
     return WeaponResult.Ok(true)
 end
 
@@ -706,6 +717,11 @@ function InstallFeatherInventoryProvider()
     end
 
     Inventory = api
+
+    if not IsCallable(api.Guards.RegisterInstanceChangeGuard) then
+        Inventory = {}
+        return Failure(nil, 'feather-inventory is missing item-lifetime guards')
+    end
 
     -- The contract check happens FIRST -- before definitions, usable
     -- callbacks or guards are registered against an API we have not yet

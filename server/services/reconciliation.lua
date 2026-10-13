@@ -67,6 +67,9 @@ local function ContextForSession(session, correlationId)
 end
 
 function ReconciliationService.RehydrateSession(session)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Native cutover is not active')
+    end
     local context = ContextForSession(session,
         ("rehydrate:%s:%s"):format(tostring(session.characterId), tostring(GetGameTimer())))
     local equippedResult = InventoryAdapter.GetEquippedSlotsForCharacter(context)
@@ -221,6 +224,9 @@ function ReconciliationService.InspectMetadata(source)
 end
 
 function ReconciliationService.Force(source)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Native cutover is not active')
+    end
     local sessionResult = CoreAdapter.ResolveSession(source)
     if not sessionResult.ok then return sessionResult end
     local session = sessionResult.value
@@ -238,6 +244,7 @@ function ReconciliationService.Force(source)
 end
 
 function ReconciliationService.BootstrapActiveSessions()
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then return end
     for _, playerId in ipairs(GetPlayers()) do
         local source = tonumber(playerId)
         if source then
@@ -251,6 +258,7 @@ function ReconciliationService.BootstrapActiveSessions()
 end
 
 RegisterNetEvent("feather-weapons:server:client-ready", function()
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then return end
     local playerSource = source
     local deadline = GetGameTimer() + 15000
     while not startupReady and GetGameTimer() < deadline do

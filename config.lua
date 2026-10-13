@@ -1,4 +1,8 @@
 Config = {
+    NativeAlphaRuntime = false, -- explicit development-only firearms host; not a full gameplay cutover
+    NativeAlphaCharacterId = nil, -- exact enrolled test character UUID; never default to every character
+    CharacterAmmunitionEnabled = false, -- alpha native integration gate; real cutover not enabled
+    CharacterAmmoTransportEnabled = false, -- checkpoint routes only; no automatic baseline/grants
     DevMode = true,
     RequiredCoreContract = 1,
     RequiredCharacterContract = 1,

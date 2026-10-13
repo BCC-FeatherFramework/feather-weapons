@@ -284,6 +284,9 @@ function EquipService.ValidateConfiguration()
 end
 
 function EquipService.Request(source, rpcContext, itemInstanceId, slot)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local context = BuildContext(source, rpcContext, rpcContext.correlationId, "equip")
     local validationResult = EquipService.ValidateOwnedItem(context, itemInstanceId)
     if not validationResult.ok then return validationResult end
@@ -295,6 +298,9 @@ function EquipService.Request(source, rpcContext, itemInstanceId, slot)
 end
 
 function EquipService.Acknowledge(source, rpcContext, token)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     if type(token) ~= "string" or #token > 256 then
         return WeaponResult.Error(WeaponErrors.AUTHORIZATION_INVALID, "Equip authorization is invalid", nil,
             rpcContext.correlationId)
@@ -314,6 +320,9 @@ function EquipService.Acknowledge(source, rpcContext, token)
 end
 
 function EquipService.Restore(source, session, itemInstanceId, correlationId, slot)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local context = BuildContext(source, session, correlationId, "reconcile")
     local validationResult = EquipService.ValidateOwnedItem(context, itemInstanceId)
     if not validationResult.ok then return validationResult end
@@ -325,6 +334,9 @@ function EquipService.Restore(source, session, itemInstanceId, correlationId, sl
 end
 
 function EquipService.Unequip(source, rpcContext, slot)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local runtime = WeaponRuntime.Get(source)
     if not runtime or runtime.sessionId ~= rpcContext.sessionId then
         return WeaponResult.Error(WeaponErrors.SESSION_EXPIRED, "Character session is no longer active", nil,

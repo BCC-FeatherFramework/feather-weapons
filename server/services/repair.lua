@@ -15,6 +15,9 @@ local function Context(source, rpcContext)
 end
 
 function RepairService.Repair(source, rpcContext, request, allowOwned)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     request = type(request) == "table" and request or {}
     local slot = WeaponRuntime.NormalizeSlot(request.slot)
     local itemInstanceId = request.itemInstanceId
@@ -140,6 +143,9 @@ function RepairService.Repair(source, rpcContext, request, allowOwned)
 end
 
 function RepairService.BeginSelection(source, rpcContext, done)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     if pendingSelections[source] then
         return WeaponResult.Error(WeaponErrors.OPERATION_CONFLICT,
             "A repair selection is already pending", nil, rpcContext.correlationId)
@@ -232,6 +238,9 @@ function RepairService.BeginSelection(source, rpcContext, done)
 end
 
 function RepairService.Select(source, rpcContext, request)
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')
+    end
     local pending = pendingSelections[source]
     if not pending or pending.context.sessionId ~= rpcContext.sessionId then
         return WeaponResult.Error(WeaponErrors.OPERATION_CONFLICT,

@@ -21,6 +21,21 @@ CreateThread(function()
         return
     end
 
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        if Config.CharacterAmmunitionEnabled~=true or Config.CharacterAmmoTransportEnabled~=true
+            or Config.DevMode~=true or Config.NativeAlphaRuntime~=true
+            or type(Config.NativeAlphaCharacterId)~='string' or Config.NativeAlphaCharacterId=='' then
+            FailStartup('native_cutover_not_ready: explicit scoped alpha configuration required')
+            return
+        end
+        local definitions=DefinitionRegistry.Start()
+        if not definitions.ok then FailStartup(definitions.error.message,definitions.error.details); return end
+        local installed,reason=WeaponCharacterAmmoInventoryProvider.Install()
+        if not installed then FailStartup(reason); return end
+        print('[feather-weapons] scoped native alpha firearms host ready; legacy gameplay disabled')
+        return -- Never install legacy usable items, provenance/bootstrap or hybrid restoration.
+    end
+
     local definitionResult = DefinitionRegistry.Start()
     if not definitionResult.ok then
         FailStartup(definitionResult.error.message, definitionResult.error.details)
