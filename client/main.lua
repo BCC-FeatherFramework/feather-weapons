@@ -905,6 +905,14 @@ local function FlushFirearmPools(callback, deathBoundary)
         return
     end
     local capture, failure, detail = FeatherFirearmPools.Capture(PlayerPedId(), WeaponDefinitionCatalog)
+    if not capture and failure == 'pools_not_ready' then
+        -- No pool was materialized on the ped (its restore was refused, for
+        -- example mixed_firearm_pool_modes): nothing can have been spent, so
+        -- there is nothing to save, and refusing would block the unequip that
+        -- resolves the conflict.
+        callback({ ok = true, value = { skipped = 'pools_not_ready' } })
+        return
+    end
     if not capture then
         callback({ ok = false, error = { code = failure, detail = detail,
             message = 'Firearm pool observation is not safe to checkpoint.' } })
@@ -1775,10 +1783,15 @@ function FeatherWeaponsClient.Checkpoint(callback, skipExtras)
     if FirearmPoolsActive() and not skipExtras then
         FlushFirearmPools(function(result)
             if not result or not result.ok then callback(result); return end
-            -- Firearms have committed atomically; independently checkpoint knives.
+            -- Firearms have committed atomically; independently checkpoint knives,
+            -- and any legacy (unpooled) long gun left by a refused pool restore.
             local slots = {}
             for _, slot in ipairs(extraSlotNames) do
-                if extraSlots[slot] and WeaponConstants.ThrowableSlots[slot] then slots[#slots + 1] = slot end
+                local state = extraSlots[slot]
+                if state and (WeaponConstants.ThrowableSlots[slot]
+                    or ((slot == 'shoulder' or slot == 'back') and not state.ammoPools)) then
+                    slots[#slots + 1] = slot
+                end
             end
             local function Next(index)
                 if index > #slots then callback(result); return end
