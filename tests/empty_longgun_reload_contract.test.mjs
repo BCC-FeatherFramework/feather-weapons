@@ -1,6 +1,6 @@
 import {readFileSync} from 'node:fs';
 import assert from 'node:assert/strict';
-const source = readFileSync(new URL('../client/main.lua', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../client/main.lua', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const start = source.indexOf('-- Empty longguns must not see another item');
 const end = source.indexOf('\nCreateThread(function()', source.indexOf('end)\n', start) + 5);
 assert.ok(start >= 0 && end > start);

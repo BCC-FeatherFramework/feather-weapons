@@ -3,6 +3,9 @@
 WeaponCharacterAmmoTransport={}
 local function valid(kind,id,report)
     if kind~='restore' and kind~='observe' and kind~='seal' and kind~='cleanup' and kind~='transfer' then return false end
+    if type(report)=='table' and report.deathWear~=nil then
+        if kind~='seal' or not WeaponCharacterLifecycleWear.DeathReport(report.deathWear) then return false end
+    end
     if kind=='transfer' then
         local spec=type(report)=='table' and report.transfer
         if type(spec)~='table' or type(spec.ammunitionId)~='string' or #spec.ammunitionId<1 or #spec.ammunitionId>128

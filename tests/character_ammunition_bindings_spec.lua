@@ -1,4 +1,5 @@
 dofile('shared/character_ammunition_transport.lua')
+dofile('client/character_ammunition_checkpoint.lua')
 Config={CharacterAmmunitionEnabled=false,CharacterAmmoTransportEnabled=false}
 local events,handlers={},{}
 RegisterNetEvent=function(name,fn) events[name]=fn end

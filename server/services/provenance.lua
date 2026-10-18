@@ -146,7 +146,9 @@ function WeaponProvenanceService.Inspect(request, context, invokingResource)
     if not itemId then
         itemId = rows[1] and tonumber(rows[1].item_instance_id) or nil
     end
-    local current = itemId and InventoryAdapter.GetInstance(context, itemId) or nil
+    local reader=(Config.CharacterAmmunitionEnabled==true and Config.CharacterAmmoTransportEnabled==true)
+        and WeaponNativeOwnershipReader or InventoryAdapter
+    local current = itemId and reader and reader.GetInstance(context, itemId) or nil
     return WeaponResult.Ok({
         itemInstanceId = itemId,
         serialNumber = serial or (rows[1] and rows[1].serial_number),

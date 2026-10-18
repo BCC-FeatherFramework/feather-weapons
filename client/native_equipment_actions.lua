@@ -22,18 +22,20 @@ RegisterNetEvent('feather-weapons:client:native-equipment-result',function(id,sc
     if source~=65535 or not pending or id~=pending.id or not same(scope,pending.scope) or type(result)~='table' then return end
     pending.result=result
 end)
-local function request(kind,itemId,action,slot,scope)
+local function request(kind,itemId,action,slot,scope,attachmentId)
     if GetInvokingResource()~='feather-inventory' then return failure('equipment_caller_denied') end
     if pending then return failure('equipment_action_in_flight') end
     if type(itemId)~='number' or itemId<1 or itemId%1~=0 or itemId==math.huge then return failure('invalid_equipment_item') end
     local bound=current()
-    if not bound or (kind=='change' and not same(scope,bound)) then return failure('equipment_panel_expired_reopen') end
+    if not bound or (kind~='options' and not same(scope,bound)) then return failure('equipment_panel_expired_reopen') end
+    if kind=='attachment-change' and action~='install' and action~='remove' then return failure('invalid_attachment_action') end
+    if attachmentId~=nil and (type(attachmentId)~='string' or #attachmentId<1 or #attachmentId>100) then return failure('invalid_attachment_id') end
     sequence=sequence+1
     local reservation={id=('equipment-ui:%s:%s'):format(GetGameTimer(),sequence),scope=bound}
     pending=reservation
     local called,result=pcall(function()
         TriggerServerEvent('feather-weapons:server:native-equipment-ui',reservation.id,kind,
-            {itemId=itemId,action=action,slot=slot,scope=bound})
+            {itemId=itemId,action=action,slot=slot,scope=bound,attachmentId=attachmentId})
         local started=GetGameTimer()
         while (GetGameTimer()-started)%4294967296<50000 do
             local world=WeaponCharacterAmmoWorldContext.Read()
@@ -59,3 +61,5 @@ local function request(kind,itemId,action,slot,scope)
 end
 exports('GetNativeEquipmentControls',function(itemId) return request('options',itemId) end)
 exports('ChangeNativeEquipment',function(itemId,action,slot,scope) return request('change',itemId,action,slot,scope) end)
+exports('ChangeNativeAttachment',function(itemId,action,scope,attachmentId) return request('attachment-change',itemId,action,nil,scope,attachmentId) end)
+exports('RepairNativeEquipment',function(itemId,scope) return request('repair-change',itemId,'repair',nil,scope) end)

@@ -17,13 +17,21 @@ function WeaponCharacterAmmoLoadout.New(api)
         local owned,entities={},{}
         local function fail(reason)
             -- Only handles created in this attempt; never remove all ped weapons.
-            local removed={}
+            local attempted,retained={},{}
             for i=#owned,1,-1 do
-                if not removed[owned[i].entity] then
-                    removed[owned[i].entity]=true; pcall(api.remove,owned[i])
+                local handle=owned[i]
+                if not attempted[handle.entity] then
+                    attempted[handle.entity]=true
+                    local called,removed=pcall(api.remove,handle)
+                    if not called or removed~=true then retained[#retained+1]=handle end
+                else
+                    -- A duplicate entity does not prove duplicate GUID/resource
+                    -- ownership. Do not silently clear a skipped alias record.
+                    retained[#retained+1]=handle
                 end
             end
-            state='failed'; return nil,reason
+            state='failed'
+            return nil,reason,{identity=plan.identity,handles=retained,cleanupComplete=#retained==0}
         end
         local function accept(handle,item)
             if not validHandle(handle) then return false end

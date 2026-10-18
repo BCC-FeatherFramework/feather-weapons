@@ -1,6 +1,7 @@
 -- Factory only. Trusted server owner calls Start; clients cannot open sessions.
 -- Serializes dispatch/ack/save/seal/release and never drops a hold on timeout.
 WeaponCharacterAmmoDispatch={}
+WeaponCharacterAmmoDispatch.RecoveryContract=1
 local function copy(v)
     if type(v)~='table' then return v end
     local out={}; for k,x in pairs(v) do out[k]=copy(x) end; return out
@@ -42,11 +43,24 @@ function WeaponCharacterAmmoDispatch.New(api)
         if states[source] and states[source].phase~='released' then return err('dispatch_release_required') end
         -- Reserve before the Inventory snapshot can yield.
         local state={phase='opening'}; states[source]=state
+        if api.identity then
+            local called,value=pcall(api.identity,source)
+            if states[source]~=state then return err('dispatch_lifecycle_changed') end
+            if not called or type(value)~='table' or type(value.characterId)~='string' or type(value.sessionId)~='string' then
+                states[source]=nil; return err('dispatch_session_unavailable')
+            end
+            state.identity={characterId=value.characterId,sessionId=value.sessionId}
+            if state.cancelledSessions and state.cancelledSessions[value.sessionId] then
+                states[source]=nil; return err('dispatch_lifecycle_changed')
+            end
+        end
         local ok,result=pcall(api.service.OpenLoadout,source,catalog,policy)
         if states[source]~=state then return err('dispatch_lifecycle_changed') end
         if not ok or type(result)~='table' then return freeze(source,state,'loadout_open_failed') end
         if not result.ok then states[source]=nil; return result end
         local bundle=result.value
+        if state.identity and (not bundle or not bundle.runtime or bundle.runtime.characterId~=state.identity.characterId
+            or bundle.runtime.sessionId~=state.identity.sessionId) then return freeze(source,state,'dispatch_open_session_changed') end
         if type(bundle)~='table' or type(bundle.runtime)~='table' or type(bundle.creation)~='table'
             or bundle.runtime.phase~='restoring' or not identityValid(bundle.runtime)
             or not identityValid(bundle.creation.identity)
@@ -113,6 +127,10 @@ function WeaponCharacterAmmoDispatch.New(api)
     -- Trusted lifecycle hook only; owner must revoke matching runtime itself.
     function T.Forget(source,sessionId)
         local state=states[source]
+        if state and sessionId and not state.identity and state.phase=='opening' and api.identity then
+            state.cancelledSessions=state.cancelledSessions or {}; state.cancelledSessions[sessionId]=true
+            return true -- match against resolved identity, never cancel a different new session
+        end
         if state and sessionId and (not state.identity or state.identity.sessionId~=sessionId) then return false end
         states[source]=nil; return true
     end

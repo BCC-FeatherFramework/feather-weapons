@@ -11,6 +11,11 @@ a general production cutover. See [native alpha integration](docs/native-alpha-i
 for prerequisites, accepted tests and remaining limitations. When enabled it
 quarantines legacy gameplay instead of running both ownership models together.
 
+The 0.17.0 alpha checkpoint covers maintenance, attachment transactions, lifecycle
+recovery and scoped evidence integration. See [checkpoint PR/deployment notes](docs/PR_PREPARATION_0.17.0.md).
+It requires companion Inventory0.6.0 support and does not enable the native host
+or claim production readiness.
+
 Server operation, recovery, integration, and trust boundaries are documented in
 [`docs/operations.md`](docs/operations.md).
 

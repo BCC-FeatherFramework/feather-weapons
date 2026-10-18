@@ -30,9 +30,16 @@ function WeaponCharacterAmmoSession.New(api,registry)
         if not ok or type(adapter)~='table' then return freeze('creation_adapter_unavailable') end
         creator=adapter
         local executor=WeaponCharacterAmmoLoadout.New(adapter)
-        local created
-        created,reason=executor.Create(bundle.creation)
-        if not created then return freeze(reason) end
+        local created,partial
+        created,reason,partial=executor.Create(bundle.creation)
+        if not created then
+            -- Failed native/attachment compensation still belongs to this
+            -- session. Preserve exact records for diagnostics and cleanup veto;
+            -- do not restore ammo, ack activation or invent a server release.
+            records=type(partial)=='table' and partial.handles or {}
+            if api.owned then api.owned(creator,records) end
+            return freeze(reason)
+        end
         records=created.handles
         if api.owned then api.owned(creator,records) end
         if api.ped()~=ped or api.ready()~=true then return freeze('creation_world_changed') end

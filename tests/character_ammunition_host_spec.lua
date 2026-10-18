@@ -37,6 +37,14 @@ readHook=function() deathRevision=deathRevision+1 end
 local observed,why=host.ReadDeathObservation()
 assert(not observed and why=='death_context_changed','Medical revision change refuses snapshot')
 readHook=nil
+Config.NativeAlphaLifecycleWearEnabled=true
+WeaponCharacterAmmoActiveOwner={DeathWear=function(value)
+    assert(value.medicalRevision==deathRevision); return {epoch='e',medicalRevision=deathRevision,items={}}
+end}
+assert(host.ReadDeathObservation().deathWear.epoch=='e','final death sample carries exact owned wear')
+WeaponCharacterAmmoActiveOwner.DeathWear=function() return nil end
+assert(not host.ReadDeathObservation(),'missing owned wear refuses death snapshot')
+Config.NativeAlphaLifecycleWearEnabled=false
 assert(captured.identity().characterId=='actual' and captured.ready())
 adapters.ped=function() return 99 end
 assert(captured.ready(),'adapter table mutation cannot replace captured ped callback')

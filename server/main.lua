@@ -30,10 +30,14 @@ CreateThread(function()
         end
         local definitions=DefinitionRegistry.Start()
         if not definitions.ok then FailStartup(definitions.error.message,definitions.error.details); return end
+        local readerReady,readerReason=WeaponNativeOwnershipReader.Install()
+        if not readerReady then FailStartup(readerReason); return end
+        local provenance=WeaponProvenanceService.Start()
+        if not provenance.ok then FailStartup(provenance.error.message,provenance.error.details); return end
         local installed,reason=WeaponCharacterAmmoInventoryProvider.Install()
         if not installed then FailStartup(reason); return end
         print('[feather-weapons] scoped native alpha firearms host ready; legacy gameplay disabled')
-        return -- Never install legacy usable items, provenance/bootstrap or hybrid restoration.
+        return -- Never install legacy usable items/provider or hybrid restoration.
     end
 
     local definitionResult = DefinitionRegistry.Start()

@@ -75,4 +75,37 @@ onWait=function() ped=11 end
 local failed,reason=adapter.createPair(items,identity)
 assert(not failed and reason:find('creation_identity_changed',1,true),'stale identity during settlement must clean up')
 ped=11; assert(not adapter.current(identity)); assert(not adapter.createSingle(items[1],0,identity))
+ped=10; points={}; owned={}
+local worn=item('WEAPON_PISTOL_SEMIAUTO',2)
+worn.maintenance={permanentDegradation=0.25}
+local beforeGrants=grants
+assert(not adapter.createSingle(worn,0,identity) and grants==beforeGrants,'missing readback refuses before grant')
+local appliedPermanent
+GetObjectIndexFromEntityIndex=function(handle) return handle end
+GetWeaponPermanentDegradation=function() return appliedPermanent end
+GiveWeaponToPed=function(...)
+    appliedPermanent=select(12,...); give(...)
+end
+local restored=assert(adapter.createSingle(worn,0,identity))
+assert(appliedPermanent==0.25,'creation forwards saved permanent wear, not zero')
+assert(adapter.remove(restored))
+GetWeaponPermanentDegradation=function() return 0 end
+assert(not adapter.createSingle(worn,0,identity),'ineffective permanent argument compensates creation')
+assert(not owned[101])
+local wornPair={item('WEAPON_PISTOL_M1899',2),item('WEAPON_PISTOL_M1899',3)}
+wornPair[1].maintenance={permanentDegradation=0.2}
+assert(not adapter.createPair(wornPair,identity),'unproven GUID permanent restoration refused')
+GetWeaponPermanentDegradation=function() return appliedPermanent end
+local applications=0
+local restoring=WeaponCharacterAmmoCreationNative.New(10,function() return true end,function() return true end,
+    function(record,scope,maintenance)
+        assert(record.entity>0 and scope==identity and maintenance==worn.maintenance)
+        applications=applications+1; return true
+    end)
+restored=assert(restoring.createSingle(worn,0,identity))
+assert(applications==1); assert(restoring.remove(restored))
+local refusing=WeaponCharacterAmmoCreationNative.New(10,function() return true end,function() return true end,
+    function() return false,'maintenance_sentinel' end)
+local failedRestore,restoreReason=refusing.createSingle(worn,0,identity)
+assert(not failedRestore and restoreReason:find('maintenance_sentinel',1,true) and not owned[101])
 print('character_ammunition_creation_native_spec PASS (native mocks, zero ammo, ownership refusal, GUID pair, compensation, ped binding)')

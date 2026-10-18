@@ -8,7 +8,15 @@ function WeaponAPI.GetCapabilities()
             definitions=DefinitionRegistry.Counts(),
             features={nativeAlphaFirearms=true,scopedCharacterOnly=true,
                 legacyGameplay=false,equip=false,ammunitionManagement=false,repair=false,
-                attachmentTransactions=false,productionReady=false}}
+                attachmentTransactions=false,productionReady=false,
+                evidenceHolds=WeaponEvidenceService~=nil and WeaponEvidenceService.NativeAvailable~=nil
+                    and WeaponEvidenceService.NativeAvailable()==true
+                    and WeaponCharacterAmmoInventoryProvider.Status()=='ready',destruction=false,
+                administrativeHoldGuards=WeaponCharacterAmmoInventoryProvider.Status()=='ready',
+                ownershipTransitionEvents=WeaponNativeOwnershipReader~=nil and WeaponNativeOwnershipReader.IsReady()==true
+                    and WeaponProvenanceService.IsReady()==true,
+                durableProvenance=WeaponProvenanceService.IsReady()==true,
+                serialInspection=WeaponProvenanceService.IsReady()==true}}
     end
     return {
         contractVersion = WeaponConstants.ContractVersion,

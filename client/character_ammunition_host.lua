@@ -51,8 +51,15 @@ function WeaponCharacterAmmoHost.New(adapters)
             or checked.medicalRevision~=value.medicalRevision or api.ped()~=value.ped then
             return nil,'death_context_changed'
         end
+        local wear
+        if Config.NativeAlphaLifecycleWearEnabled==true then
+            local owner=WeaponCharacterAmmoActiveOwner
+            local ok,result=pcall(function() return owner and owner.DeathWear(value) end)
+            if not ok or not result then return nil,'death_wear_readback_unavailable' end
+            wear=result
+        end
         return {characterId=value.characterId,sessionId=value.sessionId,ped=value.ped,
-            medicalRevision=value.medicalRevision,pools=pools,lifeState='dead'}
+            medicalRevision=value.medicalRevision,pools=pools,lifeState='dead',deathWear=wear}
     end
     function T.Receive(bundle,serverOrigin)
         if not api.enabled() then return nil,'native_host_disabled' end

@@ -108,6 +108,15 @@ local function AuthorizeModification(source, rpcContext, station, operation, equ
     return WeaponResult.Ok(true, rpcContext.correlationId)
 end
 
+-- Shared server station/authorization policy; native ownership and generation
+-- are independently reserved by the native transition coordinator, not legacy.
+function AttachmentService.AuthorizeNativeModification(source,context,operation,weapon,attachment)
+    if operation~='install' and operation~='remove' then return WeaponResult.Error(WeaponErrors.OPERATION_CONFLICT,'Invalid native attachment action') end
+    local station=AtGunsmithStation(source,context)
+    if not station.ok then return station end
+    return AuthorizeModification(source,context,station,operation,{definitionId=weapon.id},attachment)
+end
+
 function AttachmentService.Install(source, rpcContext, request)
     if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
         return WeaponResult.Error('hybrid_runtime_disabled','Legacy gameplay is disabled for native ammunition')

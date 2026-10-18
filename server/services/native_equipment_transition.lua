@@ -1,28 +1,119 @@
--- Server-owned protocol factory plus an explicitly requested, gated dry-run.
--- Player routes remain disabled; console alpha equipment changes are explicit.
+-- Server-owned scoped alpha equipment, dry-run and orderly-stop protocol.
+-- Player intent routes remain behind explicit native/scoped development gates.
 WeaponNativeEquipmentTransition={}
+WeaponNativePeriodicWear={}
+-- Scheduling only. Existing one-use read tickets and sealed transition own I/O.
+function WeaponNativePeriodicWear.New(api)
+    local states={}
+    local T={}
+    local function match(a,b)
+        return a and b and a.characterId==b.characterId and a.sessionId==b.sessionId and a.epoch==b.epoch
+    end
+    function T.Step(target)
+        if not api.enabled() then states[target]=nil; return nil,'disabled' end
+        local interval=api.interval()
+        if type(interval)~='number' or interval%1~=0 or interval<15000 or interval>300000 then return nil,'invalid_interval' end
+        local status=api.status(target)
+        if not status or not status.identity or status.phase~='active' or status.busy or api.busy(target) then return nil,'not_idle' end
+        local now=api.now()
+        local old=states[target]
+        if not old or not match(old.identity,status.identity) then
+            local sameSession=old and old.identity.characterId==status.identity.characterId and old.identity.sessionId==status.identity.sessionId
+            states[target]={identity={characterId=status.identity.characterId,sessionId=status.identity.sessionId,epoch=status.identity.epoch},
+                lastAt=now,cursor=sameSession and old.cursor or 0,unchanged=sameSession and old.unchanged or 0,
+                persisted=sameSession and old.persisted or 0,lastOutcome=sameSession and old.lastOutcome or 'waiting'}
+            return nil,'waiting'
+        end
+        if (now-old.lastAt)%4294967296<interval then return nil,'waiting' end
+        old.lastAt=now -- reserve before request adapters can yield
+        local items=api.items(target)
+        if type(items)~='table' or #items==0 or #items>4 then return nil,'no_equipped_copies' end
+        local after=api.status(target)
+        if states[target]~=old or not after or not match(after.identity,old.identity) or after.phase~='active'
+            or after.busy or api.busy(target) then return nil,'context_changed' end
+        old.cursor=old.cursor%#items+1
+        local item=items[old.cursor]
+        local called,accepted=pcall(api.request,target,item.id)
+        old.lastOutcome=called and accepted==true and 'read_requested' or 'read_refused'
+        return called and accepted==true,old.lastOutcome
+    end
+    function T.Complete(target,scope,outcome)
+        local state=states[target]
+        if not state or not match(state.identity,scope) then return false end
+        state.lastOutcome=outcome
+        if outcome=='unchanged' then state.unchanged=state.unchanged+1 end
+        if outcome=='persisted' then state.persisted=state.persisted+1 end
+        return true
+    end
+    function T.Forget(target,sessionId)
+        if states[target] and sessionId and states[target].identity.sessionId~=sessionId then return false end
+        states[target]=nil; return true
+    end
+    function T.Status(target)
+        local s=states[target]
+        return s and {epoch=s.identity.epoch,lastOutcome=s.lastOutcome,unchanged=s.unchanged,persisted=s.persisted,
+            intervalMs=api.interval(),cursor=s.cursor} or nil
+    end
+    return T
+end
 local denied,identity,same
 local function copy(value)
     if type(value)~='table' then return value end
     local out={}; for key,item in pairs(value) do out[key]=copy(item) end; return out
 end
 
--- First concrete gate is a no-equipment-write roundtrip through the actual
--- normal host. Player equip routes remain disabled until CAS wiring is ready.
+-- Concrete normal-host composition; Inventory owns conditional SQL writes.
 local function InstallDryRun()
 WeaponNativeEquipmentBindings={}
+WeaponNativeEquipmentBindings.RecoveryContract=1
 local pending={}
+local stopping={}
 local sequence=0
 local function enabled()
     return Config.DevMode==true and Config.NativeAlphaRuntime==true
         and Config.CharacterAmmunitionEnabled==true and Config.CharacterAmmoTransportEnabled==true
 end
 local coordinator
+local attachmentDisconnect={}
+local function attachmentEnabled()
+    return enabled() and Config.NativeAlphaLifecycleWearEnabled==true and type(GetConvarInt)=='function'
+        and GetConvarInt('feather_native_attachment_transactions',0)==1
+        and GetConvarInt('feather_native_saved_attachments',0)==1 and GetConvarInt('feather_native_guid_ownership',0)==1
+end
 local uiPending={}
+local wearPending={}
+local periodic,periodicIntent=nil,{}
+local logoutPending={}
+local function replyLogout(target,result)
+    local request=logoutPending[target]
+    if not request then return end
+    logoutPending[target]=nil
+    TriggerClientEvent('feather-weapons:client:native-logout-wear-result',target,request.id,request.scope,result)
+end
+local uiRates={}
+local function allowUI(target,kind)
+    local now=GetGameTimer()
+    local capacity=kind=='options' and 4 or 2
+    local rates=uiRates[target]
+    if not rates then rates={}; uiRates[target]=rates end
+    local bucket=rates[kind]
+    if not bucket then bucket={tokens=capacity,updated=now}; rates[kind]=bucket end
+    local elapsed=(now-bucket.updated)%4294967296
+    bucket.tokens=math.min(capacity,bucket.tokens+elapsed/1000)
+    bucket.updated=now
+    if bucket.tokens<1 then return false end
+    bucket.tokens=bucket.tokens-1
+    return true
+end
 local adapters={
     enabled=enabled,
     prepare=function(source,intent)
-        if intent.action~='dry-run' and intent.action~='equip' and intent.action~='unequip' and intent.action~='options' then return denied('invalid_equipment_action') end
+        local attachmentChange=intent.action=='attachment-install' or intent.action=='attachment-remove'
+        if intent.action~='dry-run' and intent.action~='shutdown' and intent.action~='equip' and intent.action~='unequip' and intent.action~='options' and intent.action~='repair' and intent.action~='maintenance' and not attachmentChange then return denied('invalid_equipment_action') end
+        if attachmentChange and not attachmentEnabled() then return denied('native_attachment_transactions_disabled') end
+        if intent.action=='repair' and Config.NativeAlphaRepairEnabled~=true then return denied('native_repair_disabled') end
+        if intent.action=='maintenance' and Config.NativeAlphaMaintenanceEnabled~=true then return denied('native_maintenance_disabled') end
+        if intent.periodic==true and (intent.action~='maintenance' or Config.NativeAlphaPeriodicWearEnabled~=true) then return denied('native_periodic_wear_disabled') end
         local session=CoreAdapter.ResolveSession(source)
         local state=WeaponCharacterAmmoDispatcher.Status(source)
         if not session or not session.ok or session.value.characterId~=Config.NativeAlphaCharacterId
@@ -32,14 +123,25 @@ local adapters={
         end
         local bound=copy(state.identity)
         if intent.scope and not same(intent.scope,bound) then return denied('equipment_panel_expired_reopen') end
-        if intent.action=='dry-run' then return {ok=true,value={identity=bound,spec={characterId=bound.characterId,action='dry-run'}}} end
+        if intent.action=='shutdown' and Config.NativeAlphaLifecycleWearEnabled==true then
+            local context={actorSource=source,characterId=bound.characterId,sessionId=bound.sessionId}
+            local snapshot=exports['feather-inventory']:ReadNativeEquipmentTransition(context,nil)
+            if not snapshot or not snapshot.ok or type(snapshot.value)~='table' then return denied('final_wear_snapshot_unavailable') end
+            return {ok=true,value={identity=bound,spec={characterId=bound.characterId,action='shutdown',
+                expected=copy(snapshot.value.expected),lifecycleSnapshot=copy(snapshot.value.equipment)}}}
+        end
+        if intent.action=='dry-run' or intent.action=='shutdown' then
+            return {ok=true,value={identity=bound,spec={characterId=bound.characterId,action=intent.action}}}
+        end
         local slots={weapon='primary',weapon_offhand='offhand',weapon_shoulder='shoulder',weapon_back='back'}
         local slot=slots[intent.slot]
-        if intent.action~='options' and (not slot or (intent.action=='unequip' and intent.itemId~=nil)) then return denied('invalid_equipment_slot_or_item') end
+        local metadataChange=intent.action=='repair' or intent.action=='maintenance' or attachmentChange
+        if intent.action~='options' and not metadataChange and (not slot or (intent.action=='unequip' and intent.itemId~=nil)) then return denied('invalid_equipment_slot_or_item') end
+        if metadataChange and (type(intent.itemId)~='number' or intent.itemId<1 or intent.itemId%1~=0 or intent.itemId==math.huge) then return denied('invalid_repair_item') end
         local checked=WeaponCharacterAmmoService.ValidateLoadout(source)
         if not checked or not checked.ok then return denied('native_loadout_changed') end
         local context={actorSource=source,characterId=bound.characterId,sessionId=bound.sessionId}
-        local snapshot=exports['feather-inventory']:ReadNativeEquipmentTransition(context,(intent.action=='equip' or intent.action=='options') and intent.itemId or nil)
+        local snapshot=exports['feather-inventory']:ReadNativeEquipmentTransition(context,(intent.action=='equip' or intent.action=='options' or metadataChange) and intent.itemId or nil)
         if not snapshot or not snapshot.ok or type(snapshot.value)~='table' or snapshot.value.characterId~=bound.characterId then
             return denied('equipment_snapshot_unavailable')
         end
@@ -64,14 +166,119 @@ local adapters={
                     end
                 end
             end
+            -- Attachment buttons are advisory, read-only previews. The change
+            -- coordinator independently repeats every check before payment.
+            local primary,offhand=value.equipment.primary,value.equipment.offhand
+            local sameModelPair=primary and offhand and primary.metadata and offhand.metadata
+                and primary.metadata.weaponDefinitionId==offhand.metadata.weaponDefinitionId
+                and (assigned=='weapon' or assigned=='weapon_offhand')
+            if assigned and not sameModelPair and attachmentEnabled() then
+                local candidate=value.candidate
+                local definition=candidate.metadata and WeaponDefinitionCatalog.weapons[candidate.metadata.weaponDefinitionId]
+                local attachmentIds={}
+                for id in pairs(WeaponDefinitionCatalog.attachments or {}) do attachmentIds[#attachmentIds+1]=id end
+                table.sort(attachmentIds)
+                for _,attachmentId in ipairs(attachmentIds) do
+                local attachment=WeaponDefinitionCatalog.attachments[attachmentId]
+                if definition and candidate.itemName==definition.itemName and attachment then
+                    for _,action in ipairs({'install','remove'}) do
+                        local plan=WeaponCharacterAttachments.Plan(candidate.metadata,definition,attachment,'attachment-'..action)
+                        if plan then
+                            local authorization=AttachmentService.AuthorizeNativeModification(source,context,action,definition,attachment)
+                            if authorization and authorization.ok then
+                                local material=exports['feather-inventory']:ReadNativeAttachmentMaterial(context,attachment.itemName)
+                                if material and material.ok and (action=='remove' or
+                                    (type(material.value.quantity)=='number' and material.value.quantity>=1)) then
+                                    options[#options+1]={kind='attachment',action=action,attachmentId=attachment.id,
+                                        label=(action=='install' and 'Install' or 'Remove')..' — '..attachment.label}
+                                end
+                            end
+                        end
+                    end
+                end
+                end
+            end
+            if Config.NativeAlphaRepairEnabled==true then
+                local candidate=value.candidate
+                local definition=candidate.metadata and WeaponDefinitionCatalog.weapons[candidate.metadata.weaponDefinitionId]
+                if definition and candidate.itemName==definition.itemName then
+                    local repaired,cost=WeaponCharacterMaintenance.Repair(candidate.metadata,definition)
+                    if repaired then
+                        local material=exports['feather-inventory']:ReadNativeRepairMaterial(context,cost.itemDefinitionId)
+                        local quantity=material and material.ok and material.value.quantity
+                        if type(quantity)=='number' and quantity%1==0 and quantity<math.huge and quantity>=cost.quantity then
+                            options[#options+1]={kind='repair',action='repair',label='Clean / repair — '..cost.quantity..' '..cost.itemDefinitionId}
+                        end
+                    end
+                end
+            end
             local now=WeaponCharacterAmmoDispatcher.Status(source)
             if not now or now.phase~='active' or now.busy or not same(now.identity,bound)
                 or not CoreAdapter.IsSessionCurrent(source,bound.sessionId,bound.characterId) then return denied('native_owner_changed') end
             return {ok=true,value={identity=bound,options=options,itemId=intent.itemId}}
         end
         local spec={characterId=bound.characterId,action=intent.action,slot=intent.slot,expected=copy(value.expected)}
+        if intent.periodic==true then spec.periodic=true end
+        if Config.NativeAlphaLifecycleWearEnabled==true and (intent.action=='equip' or intent.action=='unequip' or attachmentChange) then
+            spec.lifecycleSnapshot=copy(value.equipment)
+        end
         local proposed=copy(value.equipment)
-        if intent.action=='equip' then
+        if metadataChange then
+            local candidate=value.candidate
+            if type(candidate)~='table' or candidate.id~=intent.itemId then return denied('owned_repair_item_required') end
+            local definition=type(candidate.metadata)=='table' and WeaponDefinitionCatalog.weapons[candidate.metadata.weaponDefinitionId]
+            if not definition or candidate.itemName~=definition.itemName then return denied('invalid_repair_definition') end
+            local repaired,cost
+            if attachmentChange then
+                local assigned=false
+                for _,row in pairs(value.expected) do if row.itemId==candidate.id then assigned=true end end
+                if not assigned then
+                    return denied('native_attachment_equipped_owned_item_required')
+                end
+                local attachment=WeaponDefinitionCatalog.attachments and WeaponDefinitionCatalog.attachments[intent.attachmentId or 'carbine_wide_sight']
+                if not attachment then return denied('attachment_definition_unavailable') end
+                local authorized=AttachmentService.AuthorizeNativeModification(source,context,
+                    intent.action=='attachment-install' and 'install' or 'remove',definition,attachment)
+                if not authorized or not authorized.ok then return authorized or denied('attachment_authorization_unavailable') end
+                local projected,why=WeaponCharacterAttachments.Plan(candidate.metadata,definition,attachment,intent.action)
+                if not projected then return denied(why) end
+                local material=exports['feather-inventory']:ReadNativeAttachmentMaterial(context,attachment.itemName)
+                if not material or not material.ok then return denied('attachment_material_definition_unavailable') end
+                if intent.action=='attachment-install' and (type(material.value.quantity)~='number' or material.value.quantity<1) then
+                    return denied('attachment_material_required_before_release')
+                end
+                spec.attachmentId=projected.attachmentId
+                spec.attachmentPolicy={definitionId=attachment.id,slot=attachment.slot,itemName=attachment.itemName,
+                    weaponDefinitionId=definition.id,weaponItemName=definition.itemName}
+                spec.material=copy(projected.material); spec.material.definitionId=material.value.definitionId
+                repaired=projected.after
+            elseif intent.action=='maintenance' then
+                local assigned=false
+                for _,row in pairs(value.expected) do if row.itemId==candidate.id then assigned=true end end
+                if not assigned or candidate.revision~=intent.itemRevision then return denied('maintenance_owned_revision_changed') end
+                repaired,cost=WeaponCharacterMaintenance.Observe(candidate.metadata,definition,intent.report)
+                if repaired then
+                    local changed=repaired.condition~=candidate.metadata.condition
+                    for key,v in pairs(repaired.maintenance) do changed=changed or v~=candidate.metadata.maintenance[key] end
+                    if not changed then return denied('native_maintenance_unchanged') end
+                end
+            else repaired,cost=WeaponCharacterMaintenance.Repair(candidate.metadata,definition) end
+            if not repaired then return denied(cost) end
+            if intent.action=='repair' then
+            local material=exports['feather-inventory']:ReadNativeRepairMaterial(context,cost.itemDefinitionId)
+            if not material or not material.ok then return denied('repair_material_definition_unavailable') end
+            if type(material.value.quantity)~='number' or material.value.quantity%1~=0
+                or material.value.quantity==math.huge or material.value.quantity<cost.quantity then
+                return denied('repair_material_required_before_release')
+            end
+            spec.material={definitionId=material.value.definitionId,itemName=cost.itemDefinitionId,quantity=cost.quantity}
+            end
+            spec.itemId,spec.itemRevision=candidate.id,candidate.revision
+            spec.before,spec.after=copy(candidate.metadata),repaired
+            for logical,row in pairs(proposed) do
+                if row.id==candidate.id then row.metadata=copy(repaired) end
+            end
+        elseif intent.action=='equip' then
             local candidate=value.candidate
             if type(candidate)~='table' or candidate.id~=intent.itemId then return denied('owned_candidate_required') end
             for equipped,row in pairs(value.expected) do
@@ -96,6 +303,7 @@ local adapters={
         if not valid then return denied('equipment_creation_not_supported') end
         local now=WeaponCharacterAmmoDispatcher.Status(source)
         if not now or now.phase~='active' or now.busy or not same(now.identity,bound) then return denied('native_owner_changed') end
+        if spec.periodic and Config.NativeAlphaPeriodicWearEnabled~=true then return denied('native_periodic_wear_disabled') end
         return {ok=true,value={identity=bound,spec=spec}}
     end,
     current=function(source,identity)
@@ -109,6 +317,7 @@ local adapters={
     ticket=function(source) sequence=sequence+1; return ('equipment:%s:%s:%s'):format(source,GetGameTimer(),sequence) end,
     requestRelease=function(source,request)
         pending[source]=copy(request)
+        if periodicIntent[source] and same(periodicIntent[source],request.identity) then pending[source].periodic=true end
         TriggerClientEvent('feather-weapons:client:native-equipment-release',source,request)
         SetTimeout(45000,function()
             if pending[source] and pending[source].ticket==request.ticket then
@@ -118,18 +327,175 @@ local adapters={
         end)
         return true
     end,
+    finalizeSpec=function(context,spec,wear)
+        if not spec.lifecycleSnapshot then return {ok=true,value=spec} end
+        if Config.NativeAlphaLifecycleWearEnabled~=true then return denied('final_wear_gate_changed') end
+        local changes,reason=WeaponCharacterLifecycleWear.Plan(spec.lifecycleSnapshot,wear,WeaponDefinitionCatalog,context.epoch)
+        if not changes then return denied(reason) end
+        spec.lifecycleWear=changes
+        if spec.action=='attachment-install' or spec.action=='attachment-remove' then
+            for _,change in ipairs(changes) do
+                if change.itemId==spec.itemId then
+                    spec.after.condition=change.after.condition
+                    spec.after.maintenance=copy(change.after.maintenance)
+                end
+            end
+        end
+        return {ok=true,value=spec}
+    end,
     commit=function(context,spec)
         if not coordinator.CanCommit(context,spec) then return denied('equipment_commit_ticket_denied') end
+        if spec.periodic and Config.NativeAlphaPeriodicWearEnabled~=true then return denied('native_periodic_wear_disabled') end
+        if spec.action=='shutdown' then
+            if spec.lifecycleSnapshot then
+                local result=exports['feather-inventory']:CommitNativeEquipmentTransition(context,spec)
+                if not result or not result.ok then return result or denied('final_wear_commit_uncertain') end
+            end
+            stopping[context.actorSource]={characterId=context.characterId,sessionId=context.sessionId,epoch=context.epoch}
+            return {ok=true,value={unchanged=true}}
+        end
         if spec.action=='dry-run' then return {ok=true,value={unchanged=true}} end
+        if spec.action=='attachment-install' or spec.action=='attachment-remove' then
+            if not attachmentEnabled() or not WeaponNativeAttachmentMappings.Resolve(
+                WeaponDefinitionCatalog.weapons[spec.before.weaponDefinitionId],
+                WeaponDefinitionCatalog.attachments[spec.attachmentId],true) then return denied('native_attachment_transactions_disabled') end
+            local policy=AttachmentService.AuthorizeNativeModification(context.actorSource,context,
+                spec.action=='attachment-install' and 'install' or 'remove',
+                WeaponDefinitionCatalog.weapons[spec.before.weaponDefinitionId],WeaponDefinitionCatalog.attachments[spec.attachmentId])
+            if not policy or not policy.ok then return policy or denied('attachment_authorization_unavailable') end
+            if not coordinator.CanCommit(context,spec) then return denied('attachment_commit_authority_changed') end
+            local request=pending[context.actorSource]
+            local probe=attachmentDisconnect[context.actorSource]
+            local interrupt=probe and same(probe.identity,context) and probe.itemId==spec.itemId
+                and probe.action==spec.action and probe.attachmentId==spec.attachmentId
+                and GetConvarInt('feather_native_attachment_disconnect_probe',0)==1
+                and GetResourceState('feather-weapons-native-proof')=='stopped'
+            -- Consume before yielding into storage: never disconnect twice or replay.
+            if probe then attachmentDisconnect[context.actorSource]=nil end
+            local result=exports['feather-inventory']:CommitNativeAttachmentTransition(context,spec)
+            if interrupt and result and result.ok and attachmentEnabled()
+                and GetConvarInt('feather_native_attachment_disconnect_probe',0)==1
+                and CoreAdapter.IsSessionCurrent(context.actorSource,context.sessionId,context.characterId) then
+                print('[WeaponNativeAttachmentDisconnect] COMMIT confirmed; disconnecting scoped player before completion')
+                DropPlayer(context.actorSource,'Scoped attachment recovery test: reconnect to verify the durable result.')
+                for _=1,50 do
+                    if not CoreAdapter.IsSessionCurrent(context.actorSource,context.sessionId,context.characterId) then break end
+                    Wait(100)
+                end
+                if CoreAdapter.IsSessionCurrent(context.actorSource,context.sessionId,context.characterId) then
+                    return denied('attachment_probe_retirement_unconfirmed_no_retry')
+                end
+                print('[WeaponNativeAttachmentDisconnect] OBSERVED old session retired before completion; verify reconnect snapshot')
+            end
+            if result and result.ok and request and pending[context.actorSource]==request
+                and same(request.identity,context) then
+                request.action=spec.action
+                request.repairSpec=copy(spec)
+            end
+            return result
+        end
+        if spec.action=='repair' or spec.action=='maintenance' then
+            if spec.action=='repair' and Config.NativeAlphaRepairEnabled~=true then return denied('native_repair_disabled') end
+            if spec.action=='maintenance' and Config.NativeAlphaMaintenanceEnabled~=true then return denied('native_maintenance_disabled') end
+            local request=pending[context.actorSource]
+            local result=exports['feather-inventory']:CommitNativeRepairTransition(context,spec)
+            if result and result.ok and request and pending[context.actorSource]==request
+                and same(request.identity,context) then
+                request.action=spec.action; request.repairSpec=copy(spec)
+            end
+            return result
+        end
         return exports['feather-inventory']:CommitNativeEquipmentTransition(context,spec)
     end,
-    rebuild=function(source) return WeaponCharacterAmmoDispatcher.Start(source) end,
+    rebuild=function(source)
+        local request=pending[source]
+        local spec=request and request.repairSpec
+        if spec then
+            local snapshot=exports['feather-inventory']:ReadNativeEquipmentTransition(
+                {actorSource=source,characterId=request.identity.characterId,sessionId=request.identity.sessionId},spec.itemId)
+            if not snapshot or not snapshot.ok or type(snapshot.value)~='table' then return denied('repair_postcommit_snapshot_unavailable') end
+            local value=snapshot.value
+            if type(value.expected)~='table' then return denied('repair_postcommit_equipment_invalid') end
+            local wearRevisions={}
+            if spec.action=='attachment-install' or spec.action=='attachment-remove' then
+                for _,change in ipairs(spec.lifecycleWear or {}) do wearRevisions[change.itemId]=1 end
+            end
+            for slot,expected in pairs(spec.expected) do
+                local actual=value.expected[slot]
+                local revision=expected.revision+(expected.itemId==spec.itemId and 1 or 0)+(wearRevisions[expected.itemId] or 0)
+                if not actual or actual.itemId~=expected.itemId or actual.revision~=revision then
+                    return denied('repair_postcommit_equipment_changed')
+                end
+            end
+            for slot in pairs(value.expected) do if not spec.expected[slot] then return denied('repair_postcommit_equipment_changed') end end
+            local candidate=value.candidate
+            local function equal(a,b,path)
+                if type(a)~=type(b) then return false end
+                if type(a)~='table' then
+                    -- JSON decimal precision must not strand a confirmed wear
+                    -- commit. Tolerance applies only to known unit wear fields.
+                    local wear={['maintenance.degradation']=true,['maintenance.permanentDegradation']=true,
+                        ['maintenance.damage']=true,['maintenance.dirt']=true,['maintenance.soot']=true}
+                    if wear[path] and type(a)=='number' and a==a and b==b and a>=0 and a<=1 and b>=0 and b<=1 then
+                        return math.abs(a-b)<=0.000000000001
+                    end
+                    return a==b
+                end
+                for k,v in pairs(a) do
+                    if not equal(v,b[k],path and (path..'.'..tostring(k)) or tostring(k)) then return false end
+                end
+                for k in pairs(b) do if a[k]==nil then return false end end
+                return true
+            end
+            if not candidate or candidate.id~=spec.itemId or candidate.revision~=spec.itemRevision+1+(wearRevisions[spec.itemId] or 0)
+                or not equal(candidate.metadata,spec.after) then return denied('repair_postcommit_item_changed') end
+        end
+        return WeaponCharacterAmmoDispatcher.Start(source)
+    end,
     restored=function(source,identity)
         local state=WeaponCharacterAmmoDispatcher.Status(source)
         return state and state.phase=='active' and not state.busy and same(state.identity,identity) or false
     end,
 }
 coordinator=WeaponNativeEquipmentTransition.New(adapters)
+exports('ReadNativeMaintenanceAuditSpec',function(target,itemId)
+    if GetInvokingResource()~='feather-inventory' or not enabled() or Config.NativeAlphaMaintenanceEnabled~=true
+        or type(itemId)~='number' or itemId<1 or itemId%1~=0 or itemId==math.huge then return denied('maintenance_audit_denied') end
+    local session=CoreAdapter.ResolveSession(target)
+    local state=WeaponCharacterAmmoDispatcher.Status(target)
+    local transition=coordinator.Status(target)
+    if not session or not session.ok or session.value.characterId~=Config.NativeAlphaCharacterId
+        or not state or state.phase~='active' or state.busy or not identity(state.identity)
+        or (transition and transition.phase~='active') then return denied('maintenance_audit_owner_required') end
+    local bound=copy(state.identity)
+    if bound.characterId~=session.value.characterId or bound.sessionId~=session.value.sessionId then return denied('maintenance_audit_context_changed') end
+    local read=exports['feather-inventory']:ReadNativeEquipmentTransition(
+        {actorSource=target,characterId=bound.characterId,sessionId=bound.sessionId},itemId)
+    local value=read and read.ok and read.value
+    local item=value and value.candidate
+    local assigned=false
+    for _,row in pairs(value and value.expected or {}) do if row.itemId==itemId then assigned=true end end
+    local definition=item and item.metadata and WeaponDefinitionCatalog.weapons[item.metadata.weaponDefinitionId]
+    local now=WeaponCharacterAmmoDispatcher.Status(target)
+    if not assigned or not definition or item.itemName~=definition.itemName
+        or not WeaponCharacterAmmoItem.Validate(item.metadata,definition)
+        or not now or now.phase~='active' or now.busy or not same(now.identity,bound)
+        or not CoreAdapter.IsSessionCurrent(target,bound.sessionId,bound.characterId) then return denied('maintenance_audit_snapshot_changed') end
+    return {ok=true,value={characterId=bound.characterId,itemId=itemId,itemRevision=item.revision,
+        before=copy(item.metadata),conditionMaximum=definition.condition.maximum}}
+end)
+exports('ReadNativeRepairAuditSpec',function(target,itemId)
+    if GetInvokingResource()~='feather-inventory' or not enabled()
+        or Config.NativeAlphaRepairEnabled~=true or GetResourceState('feather-weapons-native-proof')~='stopped'
+        or type(target)~='number' or target<1 or target%1~=0 or target==math.huge then return denied('repair_audit_denied') end
+    local state=coordinator.Status(target)
+    if state and state.phase~='active' then return denied('repair_transition_in_flight') end
+    local result=adapters.prepare(target,{action='repair',itemId=itemId})
+    if not result.ok then return result end
+    state=coordinator.Status(target)
+    if state and state.phase~='active' then return denied('repair_transition_in_flight') end
+    return {ok=true,value=copy(result.value.spec)} -- no reservation/release/write
+end)
 local function replyUI(target,result)
     local request=uiPending[target]
     if not request then return end
@@ -141,11 +507,29 @@ RegisterNetEvent('feather-weapons:server:native-equipment-ui',function(id,kind,i
     if not enabled() or GetResourceState('feather-weapons-native-proof')~='stopped'
         or type(id)~='string' or #id<1 or #id>128 or type(intent)~='table'
         or not identity(intent.scope) or uiPending[target] then return end
-    if kind~='options' and kind~='change' then return end
+    if kind~='options' and kind~='change' and kind~='attachment-change' and kind~='repair-change' then return end
+    if kind=='repair-change' and (Config.NativeAlphaRepairEnabled~=true or intent.action~='repair') then return end
+    if kind=='attachment-change' and (not attachmentEnabled()
+        or (intent.action~='install' and intent.action~='remove')) then return end
+    if intent.attachmentId~=nil and (type(intent.attachmentId)~='string' or #intent.attachmentId<1 or #intent.attachmentId>100) then return end
     if kind=='change' and intent.action~='equip' and intent.action~='unequip' then return end
-    local request={id=id,scope=copy(intent.scope)}; uiPending[target]=request -- reserve before Core/SQL yields
-    local safe={action=kind=='options' and 'options' or intent.action,slot=intent.slot,
-        itemId=intent.itemId,scope=copy(intent.scope)}
+    if type(intent.itemId)~='number' or intent.itemId<1 or intent.itemId%1~=0 or intent.itemId==math.huge then return end
+    local slots={weapon=true,weapon_offhand=true,weapon_shoulder=true,weapon_back=true}
+    if kind=='change' and (type(intent.slot)~='string' or not slots[intent.slot]) then return end
+    -- Copy only the bounded protocol fields, never recursively copy arbitrary
+    -- client scope keys/tables. Limits apply before Core or Inventory may yield.
+    local scope={characterId=intent.scope.characterId,sessionId=intent.scope.sessionId,epoch=intent.scope.epoch}
+    if not allowUI(target,kind=='options' and 'options' or 'change') then
+        TriggerClientEvent('feather-weapons:client:native-equipment-result',target,id,scope,denied('equipment_rate_limited'))
+        return
+    end
+    local request={id=id,scope=scope}; uiPending[target]=request -- reserve before Core/SQL yields
+    local safe={action=kind=='options' and 'options' or intent.action,slot=kind=='change' and intent.slot or nil,
+        itemId=intent.itemId,scope=copy(scope)}
+    -- Native attachments use the same sealed coordinator, never the legacy RPC.
+    -- Client supplies intent only; prepare resolves catalog/material/assignment.
+    if kind=='attachment-change' then safe.action='attachment-'..intent.action; safe.attachmentId=intent.attachmentId end
+    if kind=='repair-change' then safe.action='repair' end
     if kind=='change' then
         -- UI identifies the clicked item even for Unequip. Resolve its actual
         -- assigned slot from fresh server options, not the client's slot hint.
@@ -173,34 +557,116 @@ function WeaponNativeEquipmentBindings.Attach(source,bundle)
         bundle.equipmentTransition={ticket=request.ticket,oldEpoch=request.identity.epoch}
     end
 end
+function WeaponNativeEquipmentBindings.IsStopping(source) return stopping[source]~=nil end
 exports('ValidateNativeEquipmentCommit',function(context,spec)
     -- Inventory cannot manufacture or reuse an intent after the writing phase.
     return GetInvokingResource()=='feather-inventory' and enabled()
-        and type(spec)=='table' and (spec.action=='equip' or spec.action=='unequip')
+        and type(spec)=='table' and (spec.action=='equip' or spec.action=='unequip'
+            or (spec.action=='repair' and Config.NativeAlphaRepairEnabled==true)
+            or (spec.action=='maintenance' and Config.NativeAlphaMaintenanceEnabled==true)
+            or ((spec.action=='attachment-install' or spec.action=='attachment-remove') and attachmentEnabled()
+                and type(spec.before)=='table' and WeaponNativeAttachmentMappings.Resolve(
+                    WeaponDefinitionCatalog.weapons[spec.before.weaponDefinitionId],WeaponDefinitionCatalog.attachments[spec.attachmentId],true)~=nil)
+            or (spec.action=='shutdown' and spec.lifecycleSnapshot~=nil and Config.NativeAlphaLifecycleWearEnabled==true))
+        -- Shutdown wear is a metadata-only reserved commit, not equipment removal.
+        and (spec.lifecycleSnapshot==nil or Config.NativeAlphaLifecycleWearEnabled==true)
+        and (spec.periodic~=true or Config.NativeAlphaPeriodicWearEnabled==true)
+        -- Maintenance uses the same exact reservation and released authority.
         and coordinator.CanCommit(context,spec)==true
 end)
-RegisterNetEvent('feather-weapons:server:native-equipment-released',function(ticket,identity,success)
+RegisterNetEvent('feather-weapons:server:native-equipment-released',function(ticket,identity,success,wear)
     local playerSource=source
     if not enabled() then return end
     local request=pending[playerSource]
     if not request or ticket~=request.ticket or not same(identity,request.identity) then return end
     if success~=true then
         coordinator.Cancel(playerSource,request.identity.sessionId)
+        replyLogout(playerSource,denied('logout_wear_release_failed_no_retry'))
         replyUI(playerSource,denied('equipment_release_failed_no_retry'))
         return print('[WeaponNativeEquipmentDryRun] FAIL client release refused; ownership retained')
     end
-    local result=coordinator.Released(playerSource,ticket,identity)
-    if not result.ok then replyUI(playerSource,result); print('[WeaponNativeEquipmentTransition] FAIL '..tostring(result.error.code)) end
+    local cleanWear
+    if request.collectWear then
+        if type(wear)~='table' or wear.epoch~=request.identity.epoch or type(wear.items)~='table' then
+            return print('[WeaponNativeEquipmentTransition] FAIL final wear report missing; no commit requested')
+        end
+        cleanWear={epoch=wear.epoch,items={}}
+        local count=0
+        for index,item in pairs(wear.items) do
+            count=count+1
+            if count>4 or type(index)~='number' or index<1 or index>4 or index%1~=0 or type(item)~='table'
+                or type(item.itemInstanceId)~='number' or item.itemInstanceId<1 or item.itemInstanceId%1~=0 or item.itemInstanceId==math.huge
+                or type(item.itemRevision)~='number' or item.itemRevision<0 or item.itemRevision%1~=0 or item.itemRevision==math.huge
+                or type(item.maintenance)~='table' then return print('[WeaponNativeEquipmentTransition] FAIL invalid final wear report; no commit requested') end
+            local maintenance={}
+            for _,key in ipairs({'degradation','permanentDegradation','damage','dirt','soot'}) do
+                local v=item.maintenance[key]
+                if type(v)~='number' or v~=v or v<0 or v>1 then return print('[WeaponNativeEquipmentTransition] FAIL invalid final wear values; no commit requested') end
+                maintenance[key]=v
+            end
+            cleanWear.items[index]={itemInstanceId=item.itemInstanceId,itemRevision=item.itemRevision,maintenance=maintenance}
+        end
+    end
+    local result=coordinator.Released(playerSource,ticket,identity,cleanWear)
+    if result.ok and result.value.phase=='parked' then
+        pending[playerSource]=nil
+        replyLogout(playerSource,{ok=true,value={released=true}})
+        print('[WeaponNativePrepareStop] PASS final seal/owned cleanup/server release; ready to stop resource; no equipment/ammo economic writes')
+    end
+    if not result.ok then
+        if request.periodic then periodic.Complete(playerSource,request.identity,'commit_or_rebuild_refused') end
+        replyLogout(playerSource,result)
+        replyUI(playerSource,result)
+        local state=coordinator.Status(playerSource)
+        print('[WeaponNativeEquipmentTransition] FAIL '..tostring(result.error.code)
+            ..' commitOutcome='..tostring(state and state.commitOutcome or 'not_started')
+            ..' committed='..tostring(state and state.committed==true)
+            ..' rebuildReason='..tostring(state and state.rebuildReason))
+    end
+end)
+RegisterNetEvent('feather-weapons:server:native-logout-wear',function(id,scope)
+    local target=source
+    if not enabled() or Config.NativeAlphaLifecycleWearEnabled~=true
+        or GetResourceState('feather-weapons-native-proof')~='stopped'
+        or type(id)~='string' or #id<1 or #id>128 or not identity(scope)
+        or logoutPending[target] then return end
+    local bound={characterId=scope.characterId,sessionId=scope.sessionId,epoch=scope.epoch}
+    if not allowUI(target,'change') then
+        TriggerClientEvent('feather-weapons:client:native-logout-wear-result',target,id,bound,denied('logout_wear_rate_limited')); return
+    end
+    local request={id=id,scope=bound}
+    logoutPending[target]=request -- reserve before Core/Inventory preflight yields
+    local called,result=pcall(coordinator.Begin,target,{action='shutdown',scope=bound})
+    if logoutPending[target]~=request then return end
+    if not called or not result or not result.ok then
+        replyLogout(target,(called and type(result)=='table') and result or denied('logout_wear_request_uncertain_no_retry')); return
+    end
+    SetTimeout(45000,function()
+        if logoutPending[target]==request then
+            coordinator.Cancel(target,bound.sessionId)
+            replyLogout(target,denied('logout_wear_timeout_no_retry'))
+        end
+    end)
 end)
 RegisterNetEvent('feather-weapons:server:native-equipment-restored',function(ticket,identity)
     local playerSource=source
     if not enabled() then return end
     local result=coordinator.Restored(playerSource,ticket,identity)
     if result.ok then
+        if pending[playerSource] and pending[playerSource].periodic then
+            periodic.Complete(playerSource,pending[playerSource].identity,'persisted')
+            print('[WeaponNativePeriodicWear] PASS changed wear persisted/restored; no ammo/material economic writes')
+        end
+        local repair=pending[playerSource] and pending[playerSource].action=='repair'
+        local maintenance=pending[playerSource] and pending[playerSource].action=='maintenance'
+        local attachment=pending[playerSource] and (pending[playerSource].action=='attachment-install' or pending[playerSource].action=='attachment-remove')
         pending[playerSource]=nil
         replyUI(playerSource,{ok=true,value={identity=copy(identity),phase='active'}})
         local state=coordinator.Status(playerSource)
-        print(state.committed and '[WeaponNativeEquipmentChange] PASS conditional equipment commit/fresh same-session restore; no ammo economic writes'
+        print(attachment and '[WeaponNativeAttachmentChange] PASS attachment payment/metadata CAS/fresh same-session restore; no ammo economic writes'
+            or maintenance and '[WeaponNativeMaintenanceCheckpoint] PASS monotonic wear CAS/fresh same-session restore; no ammo/material economic writes'
+            or repair and '[WeaponNativeRepair] PASS material payment/metadata CAS/fresh same-session restore; no ammo economic writes'
+            or state.committed and '[WeaponNativeEquipmentChange] PASS conditional equipment commit/fresh same-session restore; no ammo economic writes'
             or '[WeaponNativeEquipmentDryRun] PASS final seal/owned cleanup/server release/fresh same-session restore; no equipment/ammo economic writes')
     end
 end)
@@ -218,14 +684,272 @@ RegisterCommand('WeaponNativeEquipmentChange',function(source,args)
     local result=coordinator.Begin(tonumber(args[1]),{action=action,slot=args[3],itemId=action=='equip' and tonumber(args[4]) or nil})
     print('[WeaponNativeEquipmentChange] '..(result.ok and 'STARTED; conditional equipment write requested' or 'REFUSED '..tostring(result.error.code)))
 end,true)
-AddEventHandler('core.session.left.v1',function(session)
-    if type(session)=='table' then
+RegisterCommand('WeaponNativePrepareStop',function(source,args)
+    if source~=0 or not enabled() or GetResourceState('feather-weapons-native-proof')~='stopped' then return end
+    if not args or #args~=1 then return print('[WeaponNativePrepareStop] usage: current-server-id') end
+    local result=coordinator.Begin(tonumber(args[1]),{action='shutdown'})
+    print('[WeaponNativePrepareStop] '..(result.ok and 'STARTED; wait for PASS before stopping' or 'REFUSED '..tostring(result.error.code)))
+end,true)
+RegisterCommand('WeaponNativeRepair',function(source,args)
+    if source~=0 or not enabled() or Config.NativeAlphaRepairEnabled~=true
+        or GetResourceState('feather-weapons-native-proof')~='stopped' then return end
+    if not args or #args~=2 then return print('[WeaponNativeRepair] usage: current-server-id owned-item-id') end
+    local result=coordinator.Begin(tonumber(args[1]),{action='repair',itemId=tonumber(args[2])})
+    print('[WeaponNativeRepair] '..(result.ok and 'STARTED; canonical repair material payment requested'
+        or 'REFUSED '..tostring(result.error.code)))
+end,true)
+RegisterCommand('WeaponNativeRepairStatus',function(source,args)
+    if source~=0 or not enabled() or Config.NativeAlphaRepairEnabled~=true then return end
+    local target,itemId=tonumber(args and args[1]),tonumber(args and args[2])
+    if not args or #args~=2 or not target or target<1 or target%1~=0 or target==math.huge
+        or not itemId or itemId<1 or itemId%1~=0 or itemId==math.huge then
+        return print('[WeaponNativeRepairStatus] REFUSED usage: current-server-id owned-item-id')
+    end
+    local ok,value=pcall(function()
+        local state=WeaponCharacterAmmoDispatcher.Status(target)
+        local session=CoreAdapter.ResolveSession(target)
+        if not state or state.phase~='active' or state.busy or not identity(state.identity)
+            or not session or not session.ok or session.value.characterId~=Config.NativeAlphaCharacterId
+            or session.value.characterId~=state.identity.characterId or session.value.sessionId~=state.identity.sessionId then return nil end
+        local scope=copy(state.identity)
+        local context={actorSource=target,characterId=scope.characterId,sessionId=scope.sessionId}
+        local snapshot=exports['feather-inventory']:ReadNativeEquipmentTransition(context,itemId)
+        local item=snapshot and snapshot.ok and snapshot.value.candidate
+        local definition=item and item.metadata and WeaponDefinitionCatalog.weapons[item.metadata.weaponDefinitionId]
+        if not definition or item.id~=itemId or item.itemName~=definition.itemName then return nil end
+        local after,cost=WeaponCharacterMaintenance.Repair(item.metadata,definition)
+        if not after then
+            local now=WeaponCharacterAmmoDispatcher.Status(target)
+            if not now or now.phase~='active' or now.busy or not same(now.identity,scope)
+                or not CoreAdapter.IsSessionCurrent(target,scope.sessionId,scope.characterId)
+                or Config.NativeAlphaRepairEnabled~=true then return nil end
+            return {itemId=itemId,itemRevision=item.revision,repairAvailable=false,reason=cost,noSQLWrites=true,noNativeWrites=true}
+        end
+        local material=exports['feather-inventory']:ReadNativeRepairMaterial(context,cost.itemDefinitionId)
+        local now=WeaponCharacterAmmoDispatcher.Status(target)
+        local quantity=material and material.ok and material.value and material.value.quantity
+        if type(quantity)~='number' or quantity<0 or quantity%1~=0 or quantity==math.huge
+            or not now or now.phase~='active' or now.busy or not same(now.identity,scope)
+            or not CoreAdapter.IsSessionCurrent(target,scope.sessionId,scope.characterId) or Config.NativeAlphaRepairEnabled~=true then return nil end
+        return {identity=scope,itemId=itemId,itemRevision=item.revision,condition=item.metadata.condition,
+            maintenance=copy(item.metadata.maintenance),materialQuantity=material.value.quantity,
+            material=cost.itemDefinitionId,required=cost.quantity,repairAvailable=material.value.quantity>=cost.quantity,
+            repairedCondition=after.condition,noSQLWrites=true,noNativeWrites=true}
+    end)
+    print('[WeaponNativeRepairStatus] '..(ok and value and json.encode(value) or 'REFUSED current repair snapshot unavailable'))
+end,true)
+RegisterCommand('WeaponNativeAttachmentChange',function(source,args)
+    if source~=0 then return end
+    if not attachmentEnabled() or GetResourceState('feather-weapons-native-proof')~='stopped' then
+        return print('[WeaponNativeAttachmentChange] REFUSED scoped attachment flags/final-wear runtime required; proof must be stopped')
+    end
+    if not args or (#args~=3 and #args~=4) or (args[2]~='install' and args[2]~='remove') then
+        return print('[WeaponNativeAttachmentChange] usage: current-server-id install|remove equipped-item-id [attachment-id]')
+    end
+    local result=coordinator.Begin(tonumber(args[1]),{action='attachment-'..args[2],itemId=tonumber(args[3]),attachmentId=args[4]})
+    print('[WeaponNativeAttachmentChange] '..(result.ok and 'STARTED; canonical attachment payment/return requested'
+        or 'REFUSED '..tostring(result.error.code)))
+end,true)
+RegisterCommand('WeaponNativeArmAttachmentDisconnect',function(source,args)
+    if source~=0 then return end
+    local target,itemId=tonumber(args and args[1]),tonumber(args and args[2])
+    local action=args and args[3]
+    local attachmentId=args and args[4]
+    if not attachmentEnabled() or GetConvarInt('feather_native_attachment_disconnect_probe',0)~=1
+        or GetResourceState('feather-weapons-native-proof')~='stopped'
+        or not args or #args~=4 or not target or target<1 or target%1~=0 or target==math.huge
+        or not itemId or itemId<1 or itemId%1~=0 or itemId==math.huge
+        or (action~='install' and action~='remove')
+        or not WeaponDefinitionCatalog.attachments[attachmentId] then
+        return print('[WeaponNativeArmAttachmentDisconnect] REFUSED scoped opt-in/current-server-id owned-item-id install|remove attachment-id required')
+    end
+    local state=WeaponCharacterAmmoDispatcher.Status(target)
+    if not state or state.phase~='active' or state.busy or not identity(state.identity)
+        or state.identity.characterId~=Config.NativeAlphaCharacterId
+        or not CoreAdapter.IsSessionCurrent(target,state.identity.sessionId,state.identity.characterId)
+        or (coordinator.Status(target) and coordinator.Status(target).phase~='active') then
+        return print('[WeaponNativeArmAttachmentDisconnect] REFUSED current scoped idle owner required')
+    end
+    local probe={identity=copy(state.identity),itemId=itemId,action='attachment-'..action,attachmentId=attachmentId}
+    attachmentDisconnect[target]=probe
+    SetTimeout(60000,function() if attachmentDisconnect[target]==probe then attachmentDisconnect[target]=nil end end)
+    print('[WeaponNativeArmAttachmentDisconnect] ARMED matching action/current epoch only; expires in 60s; confirmed commit disconnects player')
+end,true)
+RegisterCommand('WeaponNativeAttachmentStatus',function(source,args)
+    if source~=0 then return end
+    local target=tonumber(args and args[1])
+    local itemId=tonumber(args and args[2])
+    local attachment=WeaponDefinitionCatalog.attachments and WeaponDefinitionCatalog.attachments[args and args[3] or 'carbine_wide_sight']
+    if not attachmentEnabled() or not args or (#args~=2 and #args~=3) or not attachment or not target or target<1 or target%1~=0 or target==math.huge
+        or not itemId or itemId<1 or itemId%1~=0 or itemId==math.huge then
+        return print('[WeaponNativeAttachmentStatus] REFUSED usage: current-server-id owned-item-id [attachment-id]; scoped flags required')
+    end
+    local called,value=pcall(function()
+        local state=WeaponCharacterAmmoDispatcher.Status(target)
+        local session=CoreAdapter.ResolveSession(target)
+        if not state or state.phase~='active' or state.busy or not session or not session.ok
+            or state.identity.characterId~=Config.NativeAlphaCharacterId or state.identity.sessionId~=session.value.sessionId
+            or state.identity.characterId~=session.value.characterId then return nil end
+        local scope=copy(state.identity)
+        local context={actorSource=target,characterId=scope.characterId,sessionId=scope.sessionId}
+        local snapshot=exports['feather-inventory']:ReadNativeEquipmentTransition(context,itemId)
+        local item=snapshot and snapshot.ok and snapshot.value.candidate
+        local definition=item and item.metadata and WeaponDefinitionCatalog.weapons[item.metadata.weaponDefinitionId]
+        if not definition or item.id~=itemId or item.itemName~=definition.itemName
+            or not WeaponNativeAttachmentMappings.Resolve(definition,attachment,true) then return nil end
+        local material=exports['feather-inventory']:ReadNativeAttachmentMaterial(context,attachment.itemName)
+        local after=WeaponCharacterAmmoDispatcher.Status(target)
+        if not snapshot or not snapshot.ok or not material or not material.ok or not after or after.phase~='active'
+            or after.busy or not same(after.identity,scope) or not CoreAdapter.IsSessionCurrent(target,scope.sessionId,scope.characterId)
+            or not attachmentEnabled() then return nil end
+        return {identity=scope,itemId=item.id,itemRevision=item.revision,attachments=copy(item.metadata.attachments),
+            attachmentId=attachment.id,materialQuantity=material.value.quantity,expected=copy(snapshot.value.expected),noSQLWrites=true,noNativeWrites=true}
+    end)
+    print('[WeaponNativeAttachmentStatus] '..(called and value and json.encode(value) or 'REFUSED current owned weapon/material snapshot unavailable'))
+end,true)
+local function requestWear(target,itemId,automatic)
+    if not enabled() or Config.NativeAlphaMaintenanceEnabled~=true or GetResourceState('feather-weapons-native-proof')~='stopped' then
+        return false
+    end
+    if not target or target<1 or target%1~=0 or target==math.huge
+        or not itemId or itemId<1 or itemId%1~=0 or itemId==math.huge then
+        return false
+    end
+    local status=WeaponCharacterAmmoDispatcher.Status(target)
+    local transition=coordinator.Status(target)
+    if wearPending[target] or not status or status.phase~='active' or status.busy
+        or not identity(status.identity) or status.identity.characterId~=Config.NativeAlphaCharacterId
+        or (transition and transition.phase~='active') then return false end
+    sequence=sequence+1
+    local request={ticket=('wear:%s:%s:%s'):format(target,GetGameTimer(),sequence),identity=copy(status.identity),itemId=itemId,periodic=automatic==true}
+    wearPending[target]=request
+    SetTimeout(10000,function() if wearPending[target]==request then
+        wearPending[target]=nil
+        if request.periodic then periodic.Complete(target,request.identity,'readback_timeout')
+        else print('[WeaponNativeMaintenanceCheckpoint] REFUSED readback timeout; no write requested') end
+    end end)
+    TriggerClientEvent('feather-weapons:client:native-maintenance-read',target,request.ticket,request.identity,request.itemId)
+    return true
+end
+RegisterCommand('WeaponNativeMaintenanceCheckpoint',function(source,args)
+    if source~=0 then return end
+    if not args or #args~=2 then return print('[WeaponNativeMaintenanceCheckpoint] usage: current-server-id equipped-item-id') end
+    if not requestWear(tonumber(args[1]),tonumber(args[2]),false) then print('[WeaponNativeMaintenanceCheckpoint] REFUSED scoped active idle owner required') end
+end,true)
+RegisterNetEvent('feather-weapons:server:native-maintenance-report',function(ticket,epoch,itemId,revision,report)
+    local target=source
+    local request=wearPending[target]
+    if not request or ticket~=request.ticket then return end
+    wearPending[target]=nil -- single-use before any yielding preflight
+    if not enabled() or Config.NativeAlphaMaintenanceEnabled~=true or epoch~=request.identity.epoch or itemId~=request.itemId
+        or type(revision)~='number' or revision<0 or revision%1~=0 or revision==math.huge or type(report)~='table' then
+        return print('[WeaponNativeMaintenanceCheckpoint] REFUSED stale/invalid owned readback')
+    end
+    local clean={}
+    for _,key in ipairs({'degradation','permanentDegradation','damage','dirt','soot'}) do
+        local v=report[key]
+        if type(v)~='number' or v~=v or v<0 or v>1 then return print('[WeaponNativeMaintenanceCheckpoint] REFUSED invalid wear values') end
+        clean[key]=v
+    end
+    for key in pairs(report) do if clean[key]==nil then return print('[WeaponNativeMaintenanceCheckpoint] REFUSED unexpected wear field') end end
+    if request.periodic then
+        if Config.NativeAlphaPeriodicWearEnabled~=true then return end
+        local state=WeaponCharacterAmmoDispatcher.Status(target)
+        if not state or state.phase~='active' or state.busy or not same(state.identity,request.identity) then return end
+        local found
+        for _,item in ipairs(WeaponCharacterAmmoService.ReadBoundMaintenanceItems(target) or {}) do if item.id==itemId then found=item end end
+        if not found or found.revision~=revision then return end
+        local after=WeaponCharacterMaintenance.Observe(found.metadata,found.definition,clean)
+        if not after then periodic.Complete(target,request.identity,'report_refused'); return end
+        local changed=after.condition~=found.metadata.condition
+        for key,value in pairs(after.maintenance) do changed=changed or value~=found.metadata.maintenance[key] end
+        if not changed then periodic.Complete(target,request.identity,'unchanged'); return end -- no SQL/read/rebuild
+        periodicIntent[target]=copy(request.identity)
+    end
+    local called,result=pcall(coordinator.Begin,target,{action='maintenance',itemId=itemId,itemRevision=revision,report=clean,scope=copy(request.identity),periodic=request.periodic})
+    periodicIntent[target]=nil
+    if not called then
+        if request.periodic then periodic.Complete(target,request.identity,'preflight_uncertain') end
+        return print('[WeaponNativeMaintenanceCheckpoint] REFUSED transition exception; no automatic retry')
+    end
+    if request.periodic and not result.ok then periodic.Complete(target,request.identity,'preflight_refused') end
+    if not result.ok then
+        print('[WeaponNativeMaintenanceCheckpoint] '..(result.error.code=='native_maintenance_unchanged'
+            and 'PASS unchanged wear; no release/SQL writes' or 'REFUSED '..tostring(result.error.code)))
+    end
+end)
+periodic=WeaponNativePeriodicWear.New({
+    enabled=function() return enabled() and Config.NativeAlphaMaintenanceEnabled==true and Config.NativeAlphaPeriodicWearEnabled==true end,
+    interval=function() return Config.NativeAlphaPeriodicWearIntervalMs or 60000 end,now=GetGameTimer,
+    status=function(target)
+        local status=WeaponCharacterAmmoDispatcher.Status(target)
+        return status and status.identity and status.identity.characterId==Config.NativeAlphaCharacterId and status or nil
+    end,
+    busy=function(target)
+        local state=coordinator.Status(target)
+        return wearPending[target]~=nil or pending[target]~=nil or stopping[target]~=nil or uiPending[target]~=nil
+            or logoutPending[target]~=nil or (state and state.phase~='active') or false
+    end,
+    items=function(target) return WeaponCharacterAmmoService.ReadBoundMaintenanceItems(target) end,
+    request=function(target,itemId) return requestWear(target,itemId,true) end,
+})
+RegisterCommand('WeaponNativePeriodicWearStatus',function(source,args)
+    if source~=0 or not enabled() then return end
+    local target=tonumber(args and args[1])
+    print('[WeaponNativePeriodicWearStatus] '..json.encode({enabled=Config.NativeAlphaPeriodicWearEnabled==true,state=target and periodic.Status(target)}))
+end,true)
+if type(CreateThread)=='function' and type(GetPlayers)=='function' then
+    CreateThread(function()
+        while true do
+            for _,target in ipairs(GetPlayers()) do
+                local called=pcall(periodic.Step,tonumber(target))
+                if not called then print('[WeaponNativePeriodicWear] sampler failed; no automatic mutation requested') end
+            end
+            Wait(1000)
+        end
+    end)
+end
+function WeaponNativeEquipmentBindings.RetireSession(target,sessionId)
+    if type(target)=='number' and type(sessionId)=='string' then
+        if attachmentDisconnect[target] and attachmentDisconnect[target].identity.sessionId==sessionId then attachmentDisconnect[target]=nil end
+        local session={source=target,sessionId=sessionId}
+        periodic.Forget(session.source,session.sessionId)
+        if logoutPending[session.source] and logoutPending[session.source].scope.sessionId==session.sessionId then
+            replyLogout(session.source,denied('logout_wear_session_closed_no_retry'))
+        end
         coordinator.Cancel(session.source,session.sessionId)
+        coordinator.Retire(session.source,session.sessionId)
+        if pending[target] and pending[target].identity.sessionId==sessionId then pending[target]=nil end
+        if periodicIntent[target] and periodicIntent[target].sessionId==sessionId then periodicIntent[target]=nil end
+        if wearPending[session.source] and wearPending[session.source].identity.sessionId==session.sessionId then wearPending[session.source]=nil end
+        if stopping[session.source] and stopping[session.source].sessionId==session.sessionId then stopping[session.source]=nil end
         local request=uiPending[session.source]
         if request and request.scope.sessionId==session.sessionId then replyUI(session.source,denied('equipment_session_closed_no_retry')) end
     end
+end
+function WeaponNativeEquipmentBindings.ReconcileSession(target,context)
+    if not enabled() or type(context)~='table' or context.characterId~=Config.NativeAlphaCharacterId
+        or not CoreAdapter.IsSessionCurrent(target,context.sessionId,context.characterId) then return denied('recovery_session_required') end
+    local state=coordinator.Status(target)
+    if state and not state.sessionId then return denied('recovery_transition_identity_pending') end
+    if state and state.sessionId==context.sessionId and state.phase~='active' then return denied('recovery_same_session_release_required') end
+    if state and state.sessionId~=context.sessionId then
+        if not coordinator.Retire(target,state.sessionId) then return denied('recovery_transition_still_current') end
+        WeaponNativeEquipmentBindings.RetireSession(target,state.sessionId)
+    end
+    for _,map in ipairs({pending,wearPending,stopping,uiPending,logoutPending,periodicIntent}) do
+        local value=map[target]
+        local identity=value and (value.identity or value.scope or value)
+        if identity and identity.sessionId and identity.sessionId~=context.sessionId then
+            WeaponNativeEquipmentBindings.RetireSession(target,identity.sessionId)
+        end
+    end
+    return {ok=true,value=true}
+end
+AddEventHandler('core.session.left.v1',function(session)
+    if type(session)=='table' then WeaponNativeEquipmentBindings.RetireSession(session.source,session.sessionId) end
 end)
-AddEventHandler('playerDropped',function() coordinator.Cancel(source); uiPending[source]=nil end)
+AddEventHandler('playerDropped',function() coordinator.Cancel(source); periodic.Forget(source); periodicIntent[source]=nil; uiPending[source]=nil; uiRates[source]=nil; stopping[source]=nil; wearPending[source]=nil; logoutPending[source]=nil end)
 end
 denied=function(code) return {ok=false,error={code=code}} end
 identity=function(value)
@@ -283,12 +1007,12 @@ function WeaponNativeEquipmentTransition.New(api)
         if state.phase~='preparing' or not current(source,state) then return frozen(source,state,'equipment_context_changed') end
         if not made or type(ticket)~='string' or ticket=='' or #ticket>128 then return frozen(source,state,'equipment_ticket_failed') end
         state.ticket=ticket; state.phase='releasing'
-        local sent,accepted=pcall(api.requestRelease,source,{ticket=ticket,identity=copy(state.identity)})
+        local sent,accepted=pcall(api.requestRelease,source,{ticket=ticket,identity=copy(state.identity),collectWear=state.spec.lifecycleSnapshot~=nil})
         if states[source]~=state or state.phase~='releasing' then return denied('equipment_release_lifecycle_changed') end
         if not sent or accepted~=true then return frozen(source,state,'equipment_release_dispatch_failed') end
         return {ok=true,value={phase='releasing'}}
     end
-    function T.Released(source,ticket,hint)
+    function T.Released(source,ticket,hint,wear)
         local state=states[source]
         if not state or state.phase~='releasing' or ticket~=state.ticket or not same(hint,state.identity) then
             return denied('stale_equipment_release')
@@ -297,21 +1021,57 @@ function WeaponNativeEquipmentTransition.New(api)
         if not current(source,state) then return frozen(source,state,'equipment_context_changed') end
         local checked,released=pcall(api.released,source,copy(state.identity))
         if not checked or released~=true or not current(source,state) then return frozen(source,state,'equipment_release_not_acknowledged') end
+        if api.finalizeSpec then
+            state.phase='finalizing_spec'
+            local context={actorSource=source,characterId=state.identity.characterId,sessionId=state.identity.sessionId,
+                epoch=state.identity.epoch,ticket=state.ticket}
+            local called,final=pcall(api.finalizeSpec,copy(context),copy(state.spec),copy(wear))
+            if not current(source,state) or state.phase~='finalizing_spec' then return denied('final_wear_lifecycle_changed') end
+            if not called or type(final)~='table' or final.ok~=true or type(final.value)~='table'
+                or final.value.characterId~=state.spec.characterId or final.value.action~=state.spec.action then
+                return frozen(source,state,type(final)=='table' and final.error and final.error.code or 'final_wear_plan_failed')
+            end
+            state.spec=copy(final.value)
+        end
         state.phase='writing'
         local context={actorSource=source,characterId=state.identity.characterId,sessionId=state.identity.sessionId,
             epoch=state.identity.epoch,ticket=state.ticket}
+        state.commitOutcome='pending'
         local called,committed=pcall(api.commit,copy(context),copy(state.spec))
+        -- Record the observed outcome even if lifecycle cancellation occurred
+        -- while Inventory yielded. This is evidence, not permission to resume.
+        if not called then state.commitOutcome='uncertain'
+        elseif type(committed)=='table' and committed.ok==true then
+            state.commitOutcome='confirmed'
+            state.committed=not (type(committed.value)=='table' and committed.value.unchanged==true)
+        elseif type(committed)=='table' and committed.ok==false then state.commitOutcome='refused'
+        else state.commitOutcome='uncertain' end
         if states[source]~=state or state.phase~='writing' then return denied('equipment_commit_lifecycle_changed') end
-        if not called then return frozen(source,state,'equipment_commit_uncertain_no_retry') end
-        if type(committed)~='table' or committed.ok~=true then return frozen(source,state,'equipment_commit_refused') end
-        state.committed=not (type(committed.value)=='table' and committed.value.unchanged==true)
+        if state.commitOutcome=='uncertain' then return frozen(source,state,'equipment_commit_uncertain_no_retry') end
+        if type(committed)~='table' or committed.ok~=true then
+            if type(committed)=='table' and type(committed.error)=='table' then
+                -- Preserve the provider refusal, not item metadata, for diagnosis.
+                state.commitRefusal={code=type(committed.error.code)=='string' and committed.error.code:sub(1,128) or nil,
+                    message=type(committed.error.message)=='string' and committed.error.message:sub(1,256) or nil}
+                print('[WeaponNativeEquipmentCommit] REFUSED '..tostring(state.commitRefusal.code)..': '..tostring(state.commitRefusal.message))
+            end
+            return frozen(source,state,'equipment_commit_refused')
+        end
         if not current(source,state) then return frozen(source,state,'equipment_committed_context_changed') end
+        if state.spec.action=='shutdown' then
+            if state.committed then return frozen(source,state,'shutdown_mutation_forbidden') end
+            state.phase='parked'
+            return {ok=true,value={phase='parked'}}
+        end
         state.phase='rebuilding'
         local started,result=pcall(api.rebuild,source,copy(context))
         if states[source]~=state or state.phase~='rebuilding' then return denied('equipment_rebuild_lifecycle_changed') end
         local new=type(result)=='table' and result.ok==true and result.value
         if not started or not identity(new) or new.characterId~=state.identity.characterId
             or new.sessionId~=state.identity.sessionId or new.epoch==state.identity.epoch then
+            state.rebuildReason=not started and 'rebuild_adapter_exception'
+                or (type(result)=='table' and type(result.error)=='table' and type(result.error.code)=='string'
+                    and result.error.code:sub(1,128)) or 'invalid_fresh_rebuild_identity'
             return frozen(source,state,'equipment_committed_rebuild_failed')
         end
         state.newIdentity=copy(new)
@@ -354,7 +1114,7 @@ function WeaponNativeEquipmentTransition.New(api)
             return true
         end
         if sessionId and sessionId~=state.identity.sessionId then return false end
-        if state.phase=='active' then
+        if state.phase=='active' or state.phase=='parked' then
             -- Completed restore has no outstanding write/release authority.
             -- Keep the last completed evidence, but allow next-login preflight.
             retired[source]=state; states[source]=nil; return true
@@ -363,7 +1123,19 @@ function WeaponNativeEquipmentTransition.New(api)
     end
     function T.Status(source)
         local state=states[source]
-        return state and {phase=state.phase,reason=state.reason,committed=state.committed==true} or nil
+        return state and {phase=state.phase,reason=state.reason,sessionId=state.identity and state.identity.sessionId,committed=state.committed==true,
+            commitOutcome=state.commitOutcome,rebuildReason=state.rebuildReason,
+            commitRefusal=state.commitRefusal and copy(state.commitRefusal) or nil} or nil
+    end
+    function T.Retire(source,sessionId)
+        local state=states[source]
+        if not state then return true end
+        if not state.identity or state.identity.sessionId~=sessionId then return false end
+        local called,valid=pcall(api.current,source,copy(state.identity))
+        if not called or valid~=false or states[source]~=state then return false end
+        if state.commitOutcome=='pending' then state.commitOutcome='uncertain' end
+        retired[source]=state; states[source]=nil -- evidence retained, no economic replay/native cleanup claim
+        return true
     end
     return T
 end

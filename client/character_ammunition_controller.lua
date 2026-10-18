@@ -55,7 +55,7 @@ function WeaponCharacterAmmoController.New(api)
         if api.ped()~=status.ped then phase='suspended'; C.Close(); return nil,'ped_changed' end
         if not deathClosing and api.ready()~=true then return nil,'world_not_ready' end
         if status.pending then return nil,'in_flight' end
-        local pools,reason
+        local pools,reason,deathWear
         if deathClosing then
             local ok,snapshot,why=pcall(api.deathSnapshot)
             local baseline=status.baseline
@@ -63,12 +63,17 @@ function WeaponCharacterAmmoController.New(api)
                 or snapshot.characterId~=baseline.characterId or snapshot.sessionId~=baseline.sessionId
                 or snapshot.lifeState~='dead' then return fail(why or 'death_snapshot_unavailable') end
             pools=snapshot.pools
+            deathWear=snapshot.deathWear
         else pools,reason=adapter.Read(status.ped,true) end
         if not pools then return fail(reason) end
         local request
         if closing then request,reason=C.PrepareFinal(status.ped,pools,true)
         else request,reason=C.Prepare(status.ped,pools,true) end
         if not request then return fail(reason) end
+        if deathClosing and Config and Config.NativeAlphaLifecycleWearEnabled==true then
+            if not deathWear then return fail('death_wear_readback_required') end
+            request.report.deathWear=deathWear
+        end
         return send(request,status.ped)
     end
     function T.Finalize()

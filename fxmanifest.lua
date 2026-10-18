@@ -6,7 +6,7 @@ lua54 'yes'
 description 'The official weapon system for Feather framework.'
 author 'Feather Framework'
 name 'feather-weapons'
-version '0.16.0'
+version '0.17.0'
 
 shared_scripts {
     'config.lua',
@@ -28,6 +28,9 @@ shared_scripts {
     '/shared/character_ammunition_catalog.lua',
     '/shared/character_ammunition_policy.lua',
     '/shared/character_ammunition_item.lua',
+    '/shared/character_attachments.lua',
+    '/shared/character_maintenance.lua',
+    '/shared/character_lifecycle_wear.lua',
     '/shared/character_ammunition_materialization.lua',
     '/shared/character_ammunition_loadout_lease.lua',
     '/shared/character_ammunition_transport.lua',
@@ -72,6 +75,7 @@ client_scripts {
     '/client/character_ammunition_native.lua',
     '/client/character_ammunition_controller.lua',
     '/client/character_ammunition_loadout.lua',
+    '/client/character_maintenance_native.lua',
     '/client/character_ammunition_creation_native.lua',
     '/client/character_ammunition_dual_native.lua',
     '/client/character_ammunition_session.lua',
@@ -90,6 +94,7 @@ client_scripts {
     '/client/character_ammunition_startup.lua',
     '/client/character_ammunition_actions.lua',
     '/client/native_equipment_actions.lua',
+    '/client/native_maintenance_checkpoint.lua',
     '/client/guid_weapons.lua',
     '/client/native_maintenance.lua',
     '/client/native_weapon_coordinator.lua',

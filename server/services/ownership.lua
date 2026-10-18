@@ -29,7 +29,9 @@ end
 
 local function CharacterInventoryId(characterId, correlationId)
     if not characterId then return nil end
-    local inventory = InventoryAdapter.GetCharacterInventory({
+    local reader=(Config.CharacterAmmunitionEnabled==true and Config.CharacterAmmoTransportEnabled==true)
+        and WeaponNativeOwnershipReader or InventoryAdapter
+    local inventory = reader.GetCharacterInventory({
         correlationId = correlationId
     }, characterId)
     return inventory.ok and tonumber(inventory.value.id) or nil
@@ -81,10 +83,13 @@ end
 function WeaponOwnershipService.HandleCommittedMove(payload)
     if type(payload) ~= "table" then return nil end
     if tostring(payload.fromInventoryId) == tostring(payload.toInventoryId) then return nil end
-    local definitionId = InventoryAdapter.ResolveWeaponDefinitionId(payload.definitionId)
+    local reader=(Config.CharacterAmmunitionEnabled==true and Config.CharacterAmmoTransportEnabled==true)
+        and WeaponNativeOwnershipReader or InventoryAdapter
+    if not reader then return nil end
+    local definitionId = reader.ResolveWeaponDefinitionId(payload.definitionId)
     if not definitionId then return nil end
 
-    local instance = InventoryAdapter.GetInstance({ correlationId = payload.correlationId }, payload.instanceId)
+    local instance = reader.GetInstance({ correlationId = payload.correlationId }, payload.instanceId)
     if not instance.ok then
         diagnostics.failed = diagnostics.failed + 1
         print(("[feather-weapons] ownership observation failed item=%s code=%s"):format(
@@ -124,6 +129,9 @@ function WeaponOwnershipService.HandleCommittedMove(payload)
         definitionId = definitionId,
         serialNumber = metadata.serialNumber,
         revision = tonumber(payload.revision) or instance.value.metadataRevision,
+        observedRevision = instance.value.metadataRevision,
+        observedInventoryId = instance.value.inventoryId,
+        observationMatchesCommittedRevision = tonumber(payload.revision)==tonumber(instance.value.metadataRevision),
         fromInventoryId = tonumber(payload.fromInventoryId),
         toInventoryId = tonumber(payload.toInventoryId),
         actorSource = tonumber(payload.actorSource),
@@ -137,9 +145,21 @@ function WeaponOwnershipService.HandleCommittedMove(payload)
     }
 
     local source, slot = WeaponRuntime.FindLeaseByItem(payload.instanceId)
-    fact.activeLeaseViolation = source ~= nil
-    if source then
+    local nativeBound=false
+    if WeaponCharacterAmmoService and type(WeaponCharacterAmmoService.IsNativeItemBound)=='function' then
+        nativeBound=WeaponCharacterAmmoService.IsNativeItemBound(tonumber(payload.instanceId))==true
+    end
+    fact.nativeLeaseViolation=nativeBound
+    fact.activeLeaseViolation = source ~= nil or nativeBound
+    if fact.activeLeaseViolation then
         diagnostics.leaseViolations = diagnostics.leaseViolations + 1
+    end
+    if nativeBound then
+        print(('[feather-weapons] CRITICAL native-owned weapon moved item=%s from=%s to=%s'):format(
+            tostring(payload.instanceId),tostring(payload.fromInventoryId),tostring(payload.toInventoryId)))
+        -- Diagnostic only: never invoke the legacy reconciler for a native lease.
+    end
+    if source then
         fact.activeSource = source
         fact.activeSlot = slot
         print(("[feather-weapons] CRITICAL equipped weapon moved item=%s source=%s slot=%s from=%s to=%s"):format(
@@ -208,9 +228,16 @@ function WeaponOwnershipService.Destroy(context, request, invokingResource)
     local characterId = CoreAdapter.NormalizeCharacterId(request.characterId or context.characterId)
     local itemInstanceId = tonumber(request.itemInstanceId)
     local expectedSerial = CleanText(request.serialNumber, 128)
-    if not characterId or not itemInstanceId or not expectedSerial then
+    if not characterId or not itemInstanceId or itemInstanceId<1 or itemInstanceId%1~=0
+        or itemInstanceId==math.huge or not expectedSerial then
         return WeaponResult.Error(WeaponErrors.ITEM_INVALID,
             "Character, item instance, and expected serial are required", nil, context.correlationId)
+    end
+
+    if Config.CharacterAmmunitionEnabled==true or Config.CharacterAmmoTransportEnabled==true then
+        return WeaponResult.Error(WeaponErrors.OPERATION_CONFLICT,
+            'Weapon destruction is not available on the native host; no deletion was requested',
+            {reason='native_destruction_not_implemented'},context.correlationId)
     end
 
     context.characterId = characterId

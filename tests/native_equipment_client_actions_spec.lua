@@ -14,6 +14,7 @@ local sent=0
 local mode='reply'
 Wait=function(ms) clock=clock+ms end
 TriggerServerEvent=function(_,id,kind,intent)
+ if kind=='attachment-change' then assert(intent.attachmentId=='carbine_wide_sight') end
  sent=sent+1
  source=1; events['feather-weapons:client:native-equipment-result'](id,intent.scope,{ok=true,value={identity=scope}})
  if mode=='timeout' then return end
@@ -29,6 +30,15 @@ assert(registered.GetNativeEquipmentControls(112).ok and sent==1)
 local old=scope
 assert(registered.ChangeNativeEquipment(112,'unequip','weapon',scope).ok)
 assert(not registered.ChangeNativeEquipment(112,'equip','weapon',old).ok and sent==2)
+caller='foreign'
+assert(not registered.ChangeNativeAttachment(901,'install',scope).ok and sent==2)
+caller='feather-inventory'
+assert(not registered.ChangeNativeAttachment(901,'install',old).ok and sent==2,'stale attachment panel cannot dispatch')
+assert(not registered.ChangeNativeAttachment(901,'invalid',scope).ok and sent==2)
+assert(not registered.ChangeNativeAttachment(901,'install',scope,{}).ok and sent==2)
+assert(registered.ChangeNativeAttachment(901,'install',scope,'carbine_wide_sight').ok and sent==3)
+assert(not registered.RepairNativeEquipment(901,old).ok and sent==3)
+assert(registered.RepairNativeEquipment(901,scope).ok and sent==4)
 mode='timeout'; assert(not registered.GetNativeEquipmentControls(112).ok and clock>=50000,'forged client-origin reply cannot complete')
 mode='world-loss'; assert(not registered.GetNativeEquipmentControls(112).ok)
 print('Native equipment client UI PASS (caller/current scope, trusted reply, new-epoch settle, timeout, lifecycle loss)')

@@ -36,13 +36,13 @@ function WeaponCharacterAmmoClientRuntime.New(api)
     local function reserved(fn,...)
         if busy or driver.Status().stepping or driver.Status().receiving then return nil,'runtime_busy' end
         busy=true
-        local called,result,reason=pcall(fn,...)
+        local called,result,reason,extra=pcall(fn,...)
         busy=false
         if not called then
             pcall(api.block,true); pcall(host.Suspend,'runtime_operation_failed')
             return nil,'runtime_operation_failed'
         end
-        return result,reason
+        return result,reason,extra
     end
     function T.Receive(bundle,origin) return reserved(driver.Receive,bundle,origin) end
     function T.Step()
@@ -55,8 +55,15 @@ function WeaponCharacterAmmoClientRuntime.New(api)
         local result,reason=reserved(host.Checkpoint,context)
         return result or {ok=false,error={code=reason},code=reason}
     end
-    function T.ReleaseEquipment(identity,ticket)
+    function T.ReleaseEquipment(identity,ticket,collectWear)
         return reserved(function()
+            local wear
+            if collectWear==true then
+                local owner=WeaponCharacterAmmoActiveOwner
+                local called,result=pcall(function() return owner and owner.FinalWear(identity) end)
+                if not called or not result then return nil,'final_wear_readback_unavailable' end
+                wear=result -- captured before seal/removal under the release reservation
+            end
             local prepared,why=host.PrepareEquipmentRelease(identity,ticket)
             if not prepared then return nil,why end
             local release=WeaponCharacterAmmoRelease.New(host,api)
@@ -68,7 +75,7 @@ function WeaponCharacterAmmoClientRuntime.New(api)
                     host.Suspend('equipment_release_context_changed'); return nil,'equipment_release_context_changed'
                 end
                 local done,failure=release.Step()
-                if done then return true end
+                if done then return true,nil,wear end
                 if release.Status().phase=='failed' then return nil,failure end
                 api.wait(0)
             end

@@ -1,6 +1,7 @@
 -- Pure server lifecycle coordinator. It neither grants native ammo nor owns SQL.
 -- Callers must obtain baselines/epochs from server authority, never client input.
 WeaponCharacterAmmoRuntime={}
+WeaponCharacterAmmoRuntime.RecoveryContract=1
 function WeaponCharacterAmmoRuntime.New(isCurrent)
     assert(type(isCurrent)=='function','local session validator required')
     local sessions,issued={},{}
@@ -50,7 +51,7 @@ function WeaponCharacterAmmoRuntime.New(isCurrent)
         if observed.changed then return nil,'restore_mismatch' end
         s.phase='active'; return snapshot(s)
     end
-    local function prepareObservation(source,report,sealAfter)
+    local function prepareObservation(source,report,sealAfter,finalWear)
         local s=sessions[source]
         if not match(s,report) then return nil,'stale_runtime' end
         if s.phase~='active' then return nil,'not_active' end
@@ -58,18 +59,18 @@ function WeaponCharacterAmmoRuntime.New(isCurrent)
         local proposed,reason=WeaponCharacterAmmunition.Observe(s,report,s.limits)
         if not proposed then return nil,reason end
         -- Idle observations are acknowledged locally: no DB polling/revision churn.
-        if not proposed.changed then
+        if not proposed.changed and finalWear==nil then
             if sealAfter then s.phase='sealed' end
             return {unchanged=true,value=snapshot(s)}
         end
         s.sequence=s.sequence+1
-        s.pending={ticket=s.epoch..':'..s.sequence,proposed=proposed,operation='observe',sealAfter=sealAfter==true}
+        s.pending={ticket=s.epoch..':'..s.sequence,proposed=proposed,operation='observe',sealAfter=sealAfter==true,finalWear=clone(finalWear)}
         return {context={actorSource=source,characterId=s.characterId,sessionId=s.sessionId,
             runtimeEpoch=s.epoch,runtimeTicket=s.pending.ticket},
-            spec={expectedRevision=s.revision,pools=clone(proposed.pools),limits=clone(s.limits)}}
+            spec={expectedRevision=s.revision,pools=clone(proposed.pools),limits=clone(s.limits),finalWear=clone(finalWear)}}
     end
     function R.PrepareObservation(source,report) return prepareObservation(source,report,false) end
-    function R.PrepareFinalObservation(source,report) return prepareObservation(source,report,true) end
+    function R.PrepareFinalObservation(source,report,finalWear) return prepareObservation(source,report,true,finalWear) end
     function R.PrepareTransfer(source,report,id,amount,operationId)
         local s=sessions[source]
         if not match(s,report) then return nil,'stale_runtime' end
@@ -98,6 +99,14 @@ function WeaponCharacterAmmoRuntime.New(isCurrent)
             and context.runtimeEpoch==s.epoch and context.runtimeTicket==s.pending.ticket
         if not valid or not operation then return valid end
         if operation~=s.pending.operation or type(spec)~='table' or spec.expectedRevision~=s.revision then return false end
+        local function equal(a,b)
+            if type(a)~=type(b) then return false end
+            if type(a)~='table' then return a==b end
+            for k,v in pairs(a) do if not equal(v,b[k]) then return false end end
+            for k in pairs(b) do if a[k]==nil then return false end end
+            return true
+        end
+        if not equal(spec.finalWear,s.pending.finalWear) then return false end
         if type(spec.limits)~='table' then return false end
         for id,limit in pairs(s.limits) do if spec.limits[id]~=limit then return false end end
         for id in pairs(spec.limits) do if s.limits[id]==nil then return false end end
@@ -137,7 +146,11 @@ function WeaponCharacterAmmoRuntime.New(isCurrent)
     function R.Revoke(source,sessionId)
         -- Logout/drop invalidates in-flight tickets; Inventory must check before commit.
         if sessionId and sessions[source] and sessions[source].sessionId~=sessionId then return end
+        local s=sessions[source]
+        local evidence=s and snapshot(s) or nil
+        if evidence then evidence.pendingOperation=s.pending and s.pending.operation or nil end
         sessions[source]=nil
+        return evidence -- diagnostic only; not a flush, seal, grant or cleanup ack
     end
     function R.ConfirmCleanup(source,report)
         local s=sessions[source]

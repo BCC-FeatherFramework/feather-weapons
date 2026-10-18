@@ -59,8 +59,8 @@ function WeaponCharacterAmmoClientIngress.Install(runtime)
     RegisterNetEvent('feather-weapons:client:native-equipment-release',function(request)
         if stopped or source~=65535 or Config.CharacterAmmunitionEnabled~=true
             or Config.CharacterAmmoTransportEnabled~=true or type(request)~='table' then return end
-        local called,released,why=pcall(runtime.ReleaseEquipment,request.identity,request.ticket)
-        TriggerServerEvent('feather-weapons:server:native-equipment-released',request.ticket,request.identity,called and released==true)
+        local called,released,why,wear=pcall(runtime.ReleaseEquipment,request.identity,request.ticket,request.collectWear==true)
+        TriggerServerEvent('feather-weapons:server:native-equipment-released',request.ticket,request.identity,called and released==true,wear)
         if not called or not released then print('[feather-weapons] equipment release refused: '..tostring(why)) end
     end)
     return true
@@ -85,11 +85,22 @@ function WeaponCharacterAmmoClientBindings.New(enforceInput)
         checkpoint=function(handler)
             if not enabled() or checkpointBound or type(handler)~='function' then return false end
             checkpointBound=true
+            local lifecycle=WeaponCharacterAmmoCheckpoint.Lifecycle({
+                caller=GetInvokingResource,identity=function() return WeaponCharacterAmmoWorldContext.Identity() end,
+                now=GetGameTimer,wait=Wait,
+                enabled=function() return not stopped and enabled() and Config.NativeAlphaLifecycleWearEnabled==true end,
+                status=function() return ingressRuntime and ingressRuntime.Status() end,
+                send=function(id,scope) TriggerServerEvent('feather-weapons:server:native-logout-wear',id,scope) end,
+            })
+            RegisterNetEvent('feather-weapons:client:native-logout-wear-result',function(id,scope,result)
+                lifecycle.Reply(id,scope,result,source==65535)
+            end)
             exports('CheckpointCharacterAmmunitionBeforeLogout',function(context)
                 if GetInvokingResource()~='feather-character' then
                     return {ok=false,error={code='checkpoint_caller_denied'}}
                 end
                 if not enabled() then return {ok=false,error={code='character_ammunition_disabled'}} end
+                if Config.NativeAlphaLifecycleWearEnabled==true then return lifecycle.Run(context) end
                 return handler(context)
             end)
             local called,result=pcall(function()
@@ -165,11 +176,22 @@ function WeaponCharacterAmmoClientBindings.Readiness(owner)
     end)
     return true
 end
-AddEventHandler('onResourceStop',function(resource)
+local function stopNativeHost(resource)
     if resource~=GetCurrentResourceName() or stopped then return end
-    -- Stop ingress and block the owner before discarding pending replies. Do
-    -- not remove copies, reset pools or claim ambiguous SQL work was undone.
+    -- No asynchronous seal/SQL can be completed reliably during destruction.
+    -- Only an independently empty, settled owner may remove its exact copies.
     stopped=true
+    local owner=WeaponCharacterAmmoActiveOwner
+    local ownerStatus=owner and owner.Status and owner.Status()
+    if ownerStatus and ownerStatus.cleanupComplete==true and ownerStatus.ownedCopies==0 then
+        print('[feather-weapons] native stop cleanup PASS no tracked copies remain; no new SQL/release acknowledgement')
+    elseif owner and type(owner.StopZeroAmmo)=='function' then
+        local called,cleaned,why=pcall(owner.StopZeroAmmo)
+        print('[feather-weapons] native stop cleanup '..(called and cleaned==true and 'PASS owned zero-ammo copies removed; no SQL/release acknowledgement'
+            or 'REFUSED '..tostring(called and why or 'stop_cleanup_exception')..'; orderly release or operator recovery required'))
+    end
     if ingressRuntime then pcall(ingressRuntime.Suspend,'resource_stopping') end
     WeaponCharacterAmmoClientTransport.Close()
-end)
+end
+AddEventHandler('onResourceStop',stopNativeHost)
+AddEventHandler('onClientResourceStop',stopNativeHost)

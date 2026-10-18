@@ -5,7 +5,12 @@ local context={characterId='c',sessionId='s',ped=42}
 PlayerPedId=function() return 42 end
 WeaponCharacterAmmoWorldContext={Read=function() return {ok=true,value=context} end}
 local constructed,cleaned=0,0
-WeaponCharacterAmmoCreationNative.New=function(ped,current,prepare)
+WeaponCharacterMaintenanceNative={Scoped=function(ped,current)
+    assert(ped==42 and type(current)=='function')
+    return {Apply=function() return true end}
+end}
+WeaponCharacterAmmoCreationNative.New=function(ped,current,prepare,apply)
+    assert(type(apply)=='function' and apply({},identity,{})==true)
     assert(ped==42); constructed=constructed+1
     return {current=current,prepareDual=prepare}
 end

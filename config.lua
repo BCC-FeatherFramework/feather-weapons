@@ -1,5 +1,10 @@
 Config = {
     NativeAlphaRuntime = false, -- explicit development-only firearms host; not a full gameplay cutover
+    NativeAlphaRepairEnabled = false, -- scoped console/Equipment-menu repair; canonical material, opt in only
+    NativeAlphaMaintenanceEnabled = false, -- scoped wear checkpoint; no ammo/material economic writes
+    NativeAlphaPeriodicWearEnabled = false, -- idle scoped sampler; changed wear uses sealed checkpoint
+    NativeAlphaPeriodicWearIntervalMs = 60000, -- one equipped copy per interval; round-robin up to four
+    NativeAlphaLifecycleWearEnabled = false, -- final wear on equipment/stop/logout/death; opt in
     NativeAlphaCharacterId = nil, -- exact enrolled test character UUID; never default to every character
     CharacterAmmunitionEnabled = false, -- alpha native integration gate; real cutover not enabled
     CharacterAmmoTransportEnabled = false, -- checkpoint routes only; no automatic baseline/grants

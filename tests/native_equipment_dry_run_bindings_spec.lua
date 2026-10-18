@@ -42,5 +42,25 @@ state={phase='active',identity=new}
 events['feather-weapons:server:native-equipment-restored'](ticket,new)
 assert(output[#output]:find('PASS final seal/owned cleanup/server release',1,true))
 timers[1]()
+commands.WeaponNativePrepareStop(0,{'5'})
+assert(starts==1 and #sent==2 and not WeaponNativeEquipmentBindings.IsStopping(5))
+commands.WeaponNativePrepareStop(0,{'5'}); assert(#sent==2,'duplicate prepare-stop cannot dispatch again')
+local shutdownTicket=sent[2].request.ticket
+state={phase='released',identity=new}
+events['feather-weapons:server:native-equipment-released'](shutdownTicket,new,true)
+assert(starts==1 and WeaponNativeEquipmentBindings.IsStopping(5),'prepared shutdown does not rebuild')
+assert(output[#output]:find('[WeaponNativePrepareStop] PASS',1,true))
+-- Execute the real dispatcher Start wrapper: even trusted readiness must not
+-- create another native owner after an orderly shutdown has been prepared.
+local startsAfterPark=0
+local equipmentLeft=events['core.session.left.v1']
+WeaponCharacterAmmoDispatch={New=function() return {Start=function() startsAfterPark=startsAfterPark+1 end} end}
+WeaponCharacterAmmoActivation={New=function() return {} end}
+dofile('server/services/character_ammunition_dispatch.lua')
+assert(WeaponCharacterAmmoDispatcher.Start(5).error.code=='native_shutdown_prepared' and startsAfterPark==0)
+equipmentLeft({source=5,sessionId='other'})
+assert(WeaponNativeEquipmentBindings.IsStopping(5),'old session must not clear stop parking')
+equipmentLeft({source=5,sessionId='s'})
+assert(not WeaponNativeEquipmentBindings.IsStopping(5),'matching logout retires stop parking')
 print=originalPrint
 print('Native equipment dry-run bindings PASS (console/alpha gates, source binding, authoritative release, fresh dispatch/restore)')

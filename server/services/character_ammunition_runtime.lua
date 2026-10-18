@@ -7,6 +7,8 @@ end)
 local sequence=0
 local loadouts={}
 local opening={}
+local deathWrites={}
+local retirements,recoverySnapshots={},{}
 local function copy(value)
     if type(value)~='table' then return value end
     local out={}; for key,item in pairs(value) do out[key]=copy(item) end; return out
@@ -90,8 +92,48 @@ function S.OpenLoadout(source,catalog,policy)
         snapshot.value,registry.limits,epoch)
     if not opened then return failure(reason) end
     loadouts[source]={sessionId=session.sessionId,characterId=session.characterId,epoch=epoch,registry=registry,catalog=catalog,
-        lease=WeaponCharacterAmmoLoadoutLease.New(plan)}
+        lease=WeaponCharacterAmmoLoadoutLease.New(plan),equipment=copy(snapshot.value.equipment)}
+    local items={}
+    for _,item in ipairs(plan.items) do items[#items+1]={itemId=item.itemInstanceId,revision=item.itemRevision} end
+    recoverySnapshots[source]={characterId=session.characterId,sessionId=session.sessionId,epoch=epoch,
+        policy='last_durable_snapshot',ledgerRevision=snapshot.value.revision,itemRevisions=items,
+        prior=copy(retirements[session.characterId]),economicReplay=false,nativeAdoption=false}
     return {ok=true,value={runtime=opened,creation=plan,names=copy(registry.names),limits=copy(registry.limits)}}
+end
+function S.ReadRecoveryStatus(source)
+    local value=recoverySnapshots[source]
+    if not value or not enabled() or not CoreAdapter.IsSessionCurrent(source,value.sessionId,value.characterId) then return nil end
+    local out=copy(value)
+    out.currentAcknowledged=runtime.Get(source)
+    out.contract={runtime=WeaponCharacterAmmoRuntime.RecoveryContract,dispatch=WeaponCharacterAmmoDispatch and WeaponCharacterAmmoDispatch.RecoveryContract,
+        activation=WeaponCharacterAmmoDispatcher and WeaponCharacterAmmoDispatcher.RecoveryContract,
+        transitions=WeaponNativeEquipmentBindings and WeaponNativeEquipmentBindings.RecoveryContract}
+    return out
+end
+-- Trusted activation only. A new current Core session may retire obsolete
+-- server reservations; this never proves old native copies were cleaned up.
+function S.ReconcileSession(source,identity)
+    if not enabled() or Config.DevMode~=true or Config.NativeAlphaRuntime~=true or type(identity)~='table'
+        or identity.characterId~=Config.NativeAlphaCharacterId
+        or not CoreAdapter.IsSessionCurrent(source,identity.sessionId,identity.characterId) then return failure('recovery_current_scope_required') end
+    local stale={}
+    for target,bound in pairs(loadouts) do
+        if (target==source or bound.characterId==identity.characterId) and bound.sessionId~=identity.sessionId then
+            if CoreAdapter.IsSessionCurrent(target,bound.sessionId,bound.characterId) then return failure('recovery_old_session_still_current') end
+            stale[#stale+1]={source=target,sessionId=bound.sessionId}
+        end
+    end
+    for target,reservation in pairs(opening) do
+        if target==source and reservation.sessionId and reservation.sessionId~=identity.sessionId then
+            if CoreAdapter.IsSessionCurrent(target,reservation.sessionId,identity.characterId) then return failure('recovery_old_open_still_current') end
+            local found=false
+            for _,old in ipairs(stale) do if old.source==target and old.sessionId==reservation.sessionId then found=true end end
+            if not found then stale[#stale+1]={source=target,sessionId=reservation.sessionId} end
+        end
+    end
+    if not CoreAdapter.IsSessionCurrent(source,identity.sessionId,identity.characterId) then return failure('recovery_session_changed') end
+    for _,old in ipairs(stale) do S.Revoke(old.source,old.sessionId,'retired_session') end
+    return {ok=true,value={retired=stale}}
 end
 -- Explicit recheck for lifecycle dispatch/ack integration. Does not authorize
 -- arbitrary client plans, dispatch grants, or silently refresh stale revisions.
@@ -124,6 +166,50 @@ function S.IsNativeItemBound(itemId)
     for _,bound in pairs(loadouts) do if bound.lease.Contains(itemId) then return true end end
     return false
 end
+function S.CanReleaseInventoryGuards()
+    -- No callback removal while an item lease/open/final persistence operation
+    -- remains owned. Orderly ConfirmCleanup clears loadouts only after release.
+    return next(loadouts)==nil and next(opening)==nil and next(deathWrites)==nil
+end
+-- Server-only retained lease data for idle periodic sampling. No SQL/readiness
+-- hints from clients, and no metadata authority outside the release coordinator.
+function S.ReadBoundMaintenanceItems(source)
+    local bound=loadouts[source]
+    local live=runtime.Get(source)
+    if not enabled() or not bound or bound.invalid or not live or live.phase~='active'
+        or bound.epoch~=live.epoch then return nil end
+    local items={}
+    for _,row in pairs(bound.equipment or {}) do
+        local definition=row.metadata and bound.catalog.weapons[row.metadata.weaponDefinitionId]
+        if not definition or definition.itemName~=row.itemName then return nil end
+        items[#items+1]={id=row.id,revision=row.revision,metadata=copy(row.metadata),definition=copy(definition)}
+    end
+    table.sort(items,function(a,b) return a.id<b.id end)
+    return items
+end
+function S.IsDeathWearWriteAuthorized(itemId,context)
+    if Config.NativeAlphaLifecycleWearEnabled~=true or not enabled() or type(context)~='table'
+        or context.operation~='metadata_write' or context.resource~='feather-weapons' then return false end
+    local request=deathWrites[context.actorSource]
+    if not request or context.runtimeEpoch~=request.context.runtimeEpoch or context.runtimeTicket~=request.context.runtimeTicket
+        or not runtime.IsOperationCurrent(request.context,'observe',request.spec) then return false end
+    local function equal(a,b,path)
+        if type(a)~=type(b) then return false end
+        if type(a)~='table' then
+            local fields={['maintenance.degradation']=true,['maintenance.permanentDegradation']=true,
+                ['maintenance.damage']=true,['maintenance.dirt']=true,['maintenance.soot']=true}
+            if fields[path] and type(a)=='number' and a==a and b==b and a>=0 and a<=1 and b>=0 and b<=1 then return math.abs(a-b)<=1e-12 end
+            return a==b
+        end
+        for k,v in pairs(a) do if not equal(v,b[k],path and (path..'.'..tostring(k)) or tostring(k)) then return false end end
+        for k in pairs(b) do if a[k]==nil then return false end end
+        return true
+    end
+    for _,change in ipairs(request.spec.finalWear.lifecycleWear) do
+        if change.itemId==itemId and change.itemRevision==context.expectedRevision and equal(change.after,context.metadata) then return true end
+    end
+    return false
+end
 -- Dispatch failure/timeout invalidates ammo authority but retains native holds.
 -- Only a trusted lifecycle recovery may release a frozen materialization.
 function S.FreezeLoadout(source,identity)
@@ -132,11 +218,14 @@ function S.FreezeLoadout(source,identity)
         or identity.sessionId~=bound.sessionId or identity.characterId~=bound.characterId then
         return failure('stale_loadout_freeze')
     end
-    runtime.Revoke(source); bound.invalid=true
+    bound.retirementEvidence=runtime.Revoke(source); bound.invalid=true
     return {ok=true,value=true}
 end
 local function commit(request,method)
+    local bound=loadouts[request.context.actorSource]
+    if bound then bound.providerOutcome='pending' end
     local ok,result=pcall(function() return exports['feather-inventory'][method](exports['feather-inventory'],request.context,request.spec) end)
+    if bound then bound.providerOutcome=ok and type(result)=='table' and (result.ok==true and 'confirmed' or result.ok==false and 'refused') or 'uncertain' end
     local value,reason=runtime.Complete(request.context,ok and result or {ok=false})
     return value and {ok=true,value=value} or failure(reason)
 end
@@ -162,14 +251,58 @@ function S.Transfer(source,report,id,amount,operationId)
     if not request then return failure(reason) end
     return commit(request,'MutateCharacterAmmunition')
 end
+local function readMedical(source,context)
+    local called,result=pcall(function() return exports['feather-medical']:ReadNativeWeaponCondition(source,context) end)
+    return called and type(result)=='table' and result.ok==true and type(result.value)=='table' and result.value or nil
+end
+local function deathPlan(source,report)
+    local bound=loadouts[source]
+    local gate=Config.NativeAlphaLifecycleWearEnabled==true
+    if not gate then
+        if type(report)=='table' and report.deathWear~=nil then return nil,'death_wear_disabled' end
+        return nil
+    end
+    if not bound then return nil,'death_wear_loadout_required' end
+    if Config.DevMode~=true or Config.NativeAlphaRuntime~=true or bound.characterId~=Config.NativeAlphaCharacterId
+        or bound.invalid then return nil,'death_wear_scope_required' end
+    local live=runtime.Get(source)
+    if not live or live.phase~='active' or type(report)~='table' or report.characterId~=live.characterId
+        or report.sessionId~=live.sessionId or report.epoch~=live.epoch or report.revision~=live.revision then return nil,'stale_death_wear' end
+    local context={actorSource=source,characterId=bound.characterId,sessionId=bound.sessionId}
+    local medical=readMedical(source,context)
+    if not medical or loadouts[source]~=bound then return nil,'death_wear_medical_unavailable' end
+    if medical.lifeState~='dead' then
+        if report.deathWear~=nil then return nil,'death_wear_not_dead' end
+        return nil -- ordinary alive equipment/logout release uses its own wear protocol
+    end
+    local wear=WeaponCharacterLifecycleWear.DeathReport(report.deathWear)
+    if not wear or wear.epoch~=live.epoch or wear.medicalRevision~=medical.revision then return nil,'death_wear_revision_required' end
+    local called,snapshot=pcall(function() return exports['feather-inventory']:ReadNativeEquipmentTransition(context,nil) end)
+    if not called or not snapshot or not snapshot.ok or loadouts[source]~=bound then return nil,'death_wear_snapshot_unavailable' end
+    local valid=bound.lease.Validate(snapshot.value,bound.catalog,bound.registry)
+    if not valid then return nil,'death_wear_loadout_changed' end
+    local changes,why=WeaponCharacterLifecycleWear.Plan(snapshot.value.equipment,wear,bound.catalog,live.epoch)
+    if not changes then return nil,why end
+    return {characterId=bound.characterId,action='death',expected=copy(snapshot.value.expected),lifecycleWear=changes,
+        medicalRevision=medical.revision,episodeId=medical.episodeId}
+end
 function S.CheckpointAndSeal(source,report)
     if not enabled() then return failure('character_ammunition_disabled') end
-    local request,reason=runtime.PrepareFinalObservation(source,report)
+    local wear,reason=deathPlan(source,report)
+    if reason then return failure(reason) end
+    local request
+    request,reason=runtime.PrepareFinalObservation(source,report,wear)
     if not request then return failure(reason) end
     if request.unchanged then return {ok=true,value=request.value} end
     -- Final reductions must commit before the old epoch is eligible for reset.
     -- Complete seals in the same pure transition that accepts the DB result.
-    return commit(request,'ObserveCharacterAmmunition')
+    if wear then deathWrites[source]=request end
+    local called,result=pcall(commit,request,'ObserveCharacterAmmunition')
+    if deathWrites[source]==request then deathWrites[source]=nil end
+    if called and result and result.ok and wear then
+        print(('[feather-weapons] death final wear persisted changes=%s medicalRevision=%s; final ammo seal acknowledged'):format(#wear.lifecycleWear,wear.medicalRevision))
+    end
+    return called and result or failure('death_final_observation_failed')
 end
 function S.ConfirmCleanup(source,report)
     if not enabled() then return failure('character_ammunition_disabled') end
@@ -179,10 +312,23 @@ function S.ConfirmCleanup(source,report)
     loadouts[source]=nil
     return {ok=true,value=released}
 end
-function S.Revoke(source,sessionId)
+function S.Revoke(source,sessionId,reason)
+    if deathWrites[source] and (not sessionId or deathWrites[source].context.sessionId==sessionId) then deathWrites[source]=nil end
     if opening[source] and (not sessionId or opening[source].sessionId==sessionId) then opening[source]=nil end
-    runtime.Revoke(source,sessionId)
-    if loadouts[source] and (not sessionId or loadouts[source].sessionId==sessionId) then loadouts[source]=nil end
+    local bound=loadouts[source]
+    local evidence=runtime.Revoke(source,sessionId)
+    local matches=bound and (not sessionId or bound.sessionId==sessionId)
+    if matches and not evidence then evidence=bound.retirementEvidence end
+    if reason and evidence then
+        retirements[evidence.characterId]={source=source,sessionId=evidence.sessionId,epoch=evidence.epoch,
+            lastAcknowledgedLedgerRevision=evidence.revision,phase=evidence.phase,pendingOperation=evidence.pendingOperation,
+            reason=reason,kind=evidence.phase=='released' and 'orderly_release' or 'retired_unreleased',
+            nativeCleanupConfirmed=evidence.phase=='released',finalObservationInvented=false,
+            providerOutcome=bound and bound.providerOutcome or 'not_requested',
+            unresolvedPersistence=evidence.pendingOperation~=nil or bound and (bound.providerOutcome=='pending' or bound.providerOutcome=='uncertain') or false}
+    end
+    if matches then loadouts[source]=nil end
+    if recoverySnapshots[source] and (not sessionId or recoverySnapshots[source].sessionId==sessionId) then recoverySnapshots[source]=nil end
 end
 -- Reserve before Core/Inventory may yield. Both open paths share the slot.
 -- A cancelled coroutine cannot clear a newer reservation when it resumes.
@@ -200,11 +346,24 @@ for _,name in ipairs({'Open','OpenLoadout'}) do
     end
 end
 exports('ValidateCharacterAmmoRuntimeOperation',function(context,operation,spec)
-    return GetInvokingResource()=='feather-inventory' and enabled()
-        and runtime.IsOperationCurrent(context,operation,spec)==true
+    if GetInvokingResource()~='feather-inventory' or not enabled()
+        or runtime.IsOperationCurrent(context,operation,spec)~=true then return false end
+    if type(spec)=='table' and spec.finalWear~=nil then
+        if operation~='observe' or Config.NativeAlphaLifecycleWearEnabled~=true or Config.DevMode~=true
+            or Config.NativeAlphaRuntime~=true or context.characterId~=Config.NativeAlphaCharacterId then return false end
+        local medical=readMedical(context.actorSource,context)
+        return medical and medical.lifeState=='dead' and medical.revision==spec.finalWear.medicalRevision
+            and medical.episodeId==spec.finalWear.episodeId and runtime.IsOperationCurrent(context,operation,spec)==true or false
+    end
+    return true
 end)
-AddEventHandler('playerDropped',function() S.Revoke(source) end)
+if type(RegisterCommand)=='function' then RegisterCommand('WeaponNativeRecoveryStatus',function(source,args)
+    if source~=0 or Config.DevMode~=true or Config.NativeAlphaRuntime~=true then return end
+    local value=S.ReadRecoveryStatus(tonumber(args and args[1]))
+    print('[WeaponNativeRecoveryStatus] '..json.encode(value or {error='current_native_session_required'}))
+end,true) end
+AddEventHandler('playerDropped',function() S.Revoke(source,nil,'player_dropped') end)
 AddEventHandler('core.session.left.v1',function(session)
     -- Local Core lifecycle event, not a client-triggerable net route.
-    if type(session)=='table' and session.source and session.sessionId then S.Revoke(session.source,session.sessionId) end
+    if type(session)=='table' and session.source and session.sessionId then S.Revoke(session.source,session.sessionId,'session_left') end
 end)

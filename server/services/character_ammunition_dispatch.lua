@@ -3,6 +3,10 @@
 WeaponCharacterAmmoDispatcher=WeaponCharacterAmmoDispatch.New({
     enabled=function() return Config.CharacterAmmunitionEnabled==true and Config.CharacterAmmoTransportEnabled==true end,
     service=WeaponCharacterAmmoService,
+    identity=function(source)
+        local result=CoreAdapter.ResolveSession(source)
+        return result and result.ok and result.value or nil
+    end,
     dispatch=function(source,bundle)
         if WeaponNativeEquipmentBindings then WeaponNativeEquipmentBindings.Attach(source,bundle) end
         TriggerClientEvent('feather-weapons:client:character-ammo-loadout',source,bundle)
@@ -10,11 +14,16 @@ WeaponCharacterAmmoDispatcher=WeaponCharacterAmmoDispatch.New({
     timeout=function(callback) SetTimeout(15000,callback) end,
 })
 local start=WeaponCharacterAmmoDispatcher.Start
+WeaponCharacterAmmoDispatcher.RecoveryContract=1
 local function copy(value)
     if type(value)~='table' then return value end
     local out={}; for key,item in pairs(value) do out[key]=copy(item) end; return out
 end
 function WeaponCharacterAmmoDispatcher.Start(source)
+    if WeaponNativeEquipmentBindings and WeaponNativeEquipmentBindings.IsStopping
+        and WeaponNativeEquipmentBindings.IsStopping(source)==true then
+        return {ok=false,error={code='native_shutdown_prepared',message='native_shutdown_prepared'}}
+    end
     if Config.CharacterAmmunitionEnabled~=true or Config.CharacterAmmoTransportEnabled~=true then
         return {ok=false,error={code='dispatch_disabled',message='dispatch_disabled'}}
     end
@@ -47,6 +56,20 @@ WeaponCharacterAmmoActivationOwner=WeaponCharacterAmmoActivation.New({
         local identity=type(result)=='table' and result.ok==true and result.value or nil
         if Config.NativeAlphaRuntime~=true or Config.DevMode~=true or type(identity)~='table'
             or identity.characterId~=Config.NativeAlphaCharacterId then return nil end
+        if type(WeaponCharacterAmmoService.ReconcileSession)=='function' then
+            local reconciled=WeaponCharacterAmmoService.ReconcileSession(source,identity)
+            if not reconciled or not reconciled.ok then return nil end
+            for _,old in ipairs(reconciled.value.retired) do
+                WeaponCharacterAmmoDispatcher.Forget(old.source,old.sessionId)
+                if WeaponNativeEquipmentBindings and WeaponNativeEquipmentBindings.RetireSession then
+                    WeaponNativeEquipmentBindings.RetireSession(old.source,old.sessionId)
+                end
+            end
+        end
+        if WeaponNativeEquipmentBindings and WeaponNativeEquipmentBindings.ReconcileSession then
+            local result=WeaponNativeEquipmentBindings.ReconcileSession(source,identity)
+            if not result or not result.ok then return nil end
+        end
         return identity
     end,
     dispatcher=WeaponCharacterAmmoDispatcher,
