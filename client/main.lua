@@ -2533,7 +2533,26 @@ RegisterNetEvent('feather-weapons:client:useInventoryWeapon', function(itemInsta
     -- resource restart cannot turn an unequip click into a duplicate equip.
     FeatherWeaponsClient.Reconcile(function(result, rpcError)
         if not result or not result.ok then
-            inventoryWeaponInFlight = false
+            -- A failed restore (for example mixed firearm pool modes) must not
+            -- block the toggle that resolves it: when the server still has the
+            -- clicked item equipped, unequip it. Nothing native is restored, so
+            -- the checkpoint has no clip to save and stored ammo is unchanged.
+            FeatherCore.RPC.Call('feather-weapons:state:get', {}, function(state)
+                local slots = state and state.ok and type(state.value) == 'table'
+                    and type(state.value.slots) == 'table' and state.value.slots or {}
+                for slot, approved in pairs(slots) do
+                    if SameInstance(approved.itemInstanceId, itemInstanceId) then
+                        FeatherWeaponsClient.Unequip(function(removed, error)
+                            inventoryWeaponInFlight = false
+                            local failure = removed and removed.error or error
+                            Notify(removed and removed.ok and 'Weapon unequipped.'
+                                or (failure and failure.message or 'Unable to unequip this weapon.'))
+                        end, slot)
+                        return
+                    end
+                end
+                inventoryWeaponInFlight = false
+            end)
             return
         end
         -- A failed native restore clears local state, but server equipment
