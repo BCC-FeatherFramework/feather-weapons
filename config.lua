@@ -164,7 +164,7 @@ Config = {
         maxInspectionEvents = 100
     },
     Issuance = {
-        trustedResources = { ["feather-weapons"] = true, ["feather-admin"] = true, ["bcc-craft"] = true, ["bcc-shops"] = true },
+        trustedResources = { ["feather-weapons"] = true, ["feather-admin"] = true, ["bcc-craft"] = true, ["bcc-shops"] = true, ["bcc-law"] = true },
         allowedPurposes = {
             development_grant = true, admin_issue = true, purchase = true,
             crafting = true, job_issue = true, recovery = true
